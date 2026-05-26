@@ -2,10 +2,8 @@ require('dotenv').config();
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
-const { Api } = require('telegram');
 const fs = require('fs');
 const path = require('path');
-const readline = require('readline');
 const {
     PRIMARY_KEYWORDS,
     SECONDARY_KEYWORDS,
@@ -18,7 +16,6 @@ const {
 // ===== НАСТРОЙКИ =====
 const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
-const PHONE = process.env.PHONE;
 
 // ===== ХРАНЕНИЕ =====
 const leadsHistory = [];
@@ -33,7 +30,6 @@ const SESSION_FILE = path.join(__dirname, 'session', 'user_session.txt');
 function extractContacts(text) {
     const contacts = [];
     
-    // Телефон
     const phonePatterns = [
         /\+7[\s\(-]?\d{3}[\s\)-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}/g,
         /8[\s\(-]?\d{3}[\s\)-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}/g,
@@ -44,7 +40,6 @@ function extractContacts(text) {
         if (matches) contacts.push(...matches);
     });
     
-    // @username
     const usernames = text.match(/@[\w_]+/g);
     if (usernames) contacts.push(...usernames);
     
@@ -81,20 +76,17 @@ function detectUrgency(text) {
 function isRealClient(text) {
     const textLower = text.toLowerCase();
     
-    // Стоп-слова
     for (const word of STOP_WORDS) {
         if (textLower.includes(word)) {
             return { isClient: false, reason: `стоп-слово: ${word}` };
         }
     }
     
-    // Признаки клиента
     let clientScore = 0;
     CLIENT_MARKERS.forEach(marker => {
         if (textLower.includes(marker)) clientScore++;
     });
     
-    // Ключевые слова
     let primaryScore = 0;
     PRIMARY_KEYWORDS.forEach(word => {
         if (textLower.includes(word)) primaryScore++;
@@ -137,56 +129,32 @@ ${text.substring(0, 500)}${text.length > 500 ? '...' : ''}
 `.trim();
 }
 
-// ===== ЗАПРОС КОДА В КОНСОЛИ =====
-
-function askQuestion(question) {
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
-    
-    return new Promise(resolve => {
-        rl.question(question, answer => {
-            rl.close();
-            resolve(answer);
-        });
-    });
-}
-
 // ===== ЗАПУСК =====
 
-async function startClient() {
-    // Загружаем или создаём сессию
-    let stringSession;
+async function main() {
+    console.log('🤖 Запуск юзербота LeadSystem...');
     
-    if (fs.existsSync(SESSION_FILE)) {
-        stringSession = new StringSession(fs.readFileSync(SESSION_FILE, 'utf8'));
-        console.log('📂 Сессия загружена из файла');
-    } else {
-        stringSession = new StringSession('');
-        console.log('🆕 Создана новая сессия');
+    // Проверяем наличие сессии
+    if (!fs.existsSync(SESSION_FILE)) {
+        console.error('❌ Файл сессии не найден!');
+        console.error('Сначала запусти локально: npm run auth');
+        process.exit(1);
     }
+    
+    const sessionString = fs.readFileSync(SESSION_FILE, 'utf8');
+    const stringSession = new StringSession(sessionString);
     
     const client = new TelegramClient(stringSession, API_ID, API_HASH, {
         connectionRetries: 5,
     });
     
-    // Запуск с авторизацией
-    await client.start({
-        phoneNumber: async () => PHONE,
-        password: async () => await askQuestion('Введите пароль 2FA (если нет - нажмите Enter): '),
-        phoneCode: async () => await askQuestion('Введите код из Telegram: '),
-        onError: (err) => console.log('Ошибка авторизации:', err),
-    });
+    console.log('🔌 Подключение к Telegram...');
     
-    // Сохраняем сессию
-    const sessionString = client.session.save();
-    const sessionDir = path.dirname(SESSION_FILE);
-    if (!fs.existsSync(sessionDir)) {
-        fs.mkdirSync(sessionDir, { recursive: true });
-    }
-    fs.writeFileSync(SESSION_FILE, sessionString);
-    console.log('💾 Сессия сохранена');
+    await client.start({
+        phoneNumber: async () => {
+            throw new Error('Сессия недействительна. Пересоздай локально: npm run auth');
+        },
+    });
     
     console.log(`
 ✅ ЮЗЕРБОТ ЗАПУЩЕН!
@@ -205,16 +173,13 @@ async function startClient() {
         try {
             const message = event.message;
             
-            // Только входящие
             if (message.out) return;
             
-            // Текст сообщения
             const text = message.message || '';
             
             if (!text || text.length < 15) return;
             
-            // Защита от повторов
-            const chatId = message.chatId?.toString() || message.peerId?.toString() || '';
+            const chatId = message.chatId?.toString() || '';
             const msgHash = text.substring(0, 100) + chatId;
             
             if (processedMessages.has(msgHash)) return;
@@ -224,7 +189,6 @@ async function startClient() {
                 processedMessages.clear();
             }
             
-            // Проверка ключевых слов
             const textLower = text.toLowerCase();
             
             const hasPrimary = PRIMARY_KEYWORDS.some(word => textLower.includes(word));
@@ -232,7 +196,6 @@ async function startClient() {
             
             if (!hasPrimary && !hasSecondary) return;
             
-            // Проверка на клиента
             const { isClient, reason } = isRealClient(text);
             
             if (!isClient) {
@@ -240,7 +203,6 @@ async function startClient() {
                 return;
             }
             
-            // Получаем информацию о чате
             let chatName = 'Личный чат';
             let chatLink = '';
             let senderName = 'Неизвестный';
@@ -258,31 +220,23 @@ async function startClient() {
                     chatLink = `чат ID: ${chat.id}`;
                     msgLink = `${chatLink}/${message.id}`;
                 }
-            } catch (e) {
-                console.log('Ошибка получения чата:', e.message);
-            }
+            } catch (e) {}
             
-            // Отправитель
             try {
                 const sender = await message.getSender();
                 senderName = `${sender.firstName || ''} ${sender.lastName || ''}`.trim() || 'Неизвестный';
                 senderUsername = sender.username ? `@${sender.username}` : 'нет';
-            } catch (e) {
-                // Игнорируем
-            }
+            } catch (e) {}
             
-            // Анализ
             const contacts = extractContacts(text);
             const city = detectCity(text);
             const urgency = detectUrgency(text);
             
-            // Формируем лид
             const leadMessage = formatLead(
                 chatName, chatLink, senderName, senderUsername,
                 text, contacts, city, urgency, reason, msgLink
             );
             
-            // Отправляем в Избранное
             try {
                 await client.sendMessage('me', { message: leadMessage });
                 console.log(`✅ Лид: ${chatName}`);
@@ -290,7 +244,6 @@ async function startClient() {
                 console.log(`❌ Ошибка: ${e.message}`);
             }
             
-            // Сохраняем
             leadsHistory.push({
                 date: new Date(),
                 chat: chatName,
@@ -353,20 +306,10 @@ async function startClient() {
         }
     }, new NewMessage({ fromUsers: ['me'] }));
     
-    console.log('✅ Юзербот готов к работе');
+    console.log('✅ Готов к работе');
 }
 
-// ===== MAIN =====
-
-async function main() {
-    console.log('🤖 Запуск юзербота LeadSystem...');
-    
-    try {
-        await startClient();
-    } catch (error) {
-        console.error('❌ Критическая ошибка:', error.message);
-        process.exit(1);
-    }
-}
-
-main();
+main().catch(err => {
+    console.error('❌ Критическая ошибка:', err.message);
+    process.exit(1);
+});
