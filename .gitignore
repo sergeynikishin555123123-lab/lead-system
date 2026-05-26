@@ -1,5 +1,4 @@
 .env
-session/user_session.session
-__pycache__/
-*.pyc
-venv/
+session/
+node_modules/
+*.log
