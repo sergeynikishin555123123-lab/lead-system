@@ -2,8 +2,7 @@ require('dotenv').config();
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
-const fs = require('fs');
-const path = require('path');
+const readline = require('readline');
 const {
     PRIMARY_KEYWORDS,
     SECONDARY_KEYWORDS,
@@ -16,14 +15,28 @@ const {
 // ===== НАСТРОЙКИ =====
 const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
+const PHONE = process.env.PHONE;
+const SESSION_STRING = process.env.SESSION_STRING || '';
 
 // ===== ХРАНЕНИЕ =====
 const leadsHistory = [];
 const chatStats = {};
 const processedMessages = new Set();
 
-// ===== СЕССИЯ =====
-const SESSION_FILE = path.join(__dirname, 'session', 'user_session.txt');
+// ===== ИНТЕРАКТИВНЫЙ ВВОД =====
+function askQuestion(question) {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+    
+    return new Promise(resolve => {
+        rl.question(question, answer => {
+            rl.close();
+            resolve(answer);
+        });
+    });
+}
 
 // ===== ФУНКЦИИ =====
 
@@ -132,40 +145,44 @@ ${text.substring(0, 500)}${text.length > 500 ? '...' : ''}
 // ===== ЗАПУСК =====
 
 async function main() {
-    console.log('🤖 Запуск юзербота LeadSystem...');
+    console.log('🤖 Запуск юзербота LeadSystem...\n');
     
-    // Проверяем наличие сессии
-    if (!fs.existsSync(SESSION_FILE)) {
-        console.error('❌ Файл сессии не найден!');
-        console.error('Сначала запусти локально: npm run auth');
-        process.exit(1);
+    // Используем сессию из переменной окружения или создаём новую
+    let stringSession;
+    
+    if (SESSION_STRING && SESSION_STRING.length > 10) {
+        stringSession = new StringSession(SESSION_STRING);
+        console.log('📂 Использую сохранённую сессию');
+    } else {
+        stringSession = new StringSession('');
+        console.log('🆕 Новая сессия');
     }
-    
-    const sessionString = fs.readFileSync(SESSION_FILE, 'utf8');
-    const stringSession = new StringSession(sessionString);
     
     const client = new TelegramClient(stringSession, API_ID, API_HASH, {
         connectionRetries: 5,
     });
     
-    console.log('🔌 Подключение к Telegram...');
-    
+    // Авторизация
     await client.start({
-        phoneNumber: async () => {
-            throw new Error('Сессия недействительна. Пересоздай локально: npm run auth');
-        },
+        phoneNumber: async () => PHONE,
+        password: async () => await askQuestion('Пароль 2FA (если нет - Enter): '),
+        phoneCode: async () => await askQuestion('Код из Telegram: '),
+        onError: (err) => console.log('Ошибка:', err),
     });
     
-    console.log(`
-✅ ЮЗЕРБОТ ЗАПУЩЕН!
-
-Мониторинг всех чатов...
-Лиды приходят в Избранное (Saved Messages)
-
-Команды в Избранном:
-/stats - статистика
-/last - последние лиды
-`);
+    // Показываем сессию для сохранения
+    const newSessionString = client.session.save();
+    console.log('\n⚠️ СОХРАНИ ЭТУ СТРОКУ В SESSION_STRING:');
+    console.log('----------------------------------------');
+    console.log(newSessionString);
+    console.log('----------------------------------------\n');
+    
+    console.log('✅ ЮЗЕРБОТ ЗАПУЩЕН!\n');
+    console.log('Мониторинг всех чатов...');
+    console.log('Лиды приходят в Избранное (Saved Messages)\n');
+    console.log('Команды в Избранном:');
+    console.log('/stats - статистика');
+    console.log('/last - последние лиды\n');
     
     // ===== ОБРАБОТЧИК СООБЩЕНИЙ =====
     
