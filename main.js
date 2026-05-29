@@ -2,6 +2,7 @@ require('dotenv').config();
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const {
@@ -19,13 +20,13 @@ const {
 const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
 const SESSION_STRING = process.env.SESSION_STRING || '';
+const PORT = process.env.PORT || 3000;
 
 // ==========================================
 // ЛОГИРОВАНИЕ
 // ==========================================
 const LOGS_DIR = path.join(__dirname, 'logs');
 
-// Создаём папку для логов
 if (!fs.existsSync(LOGS_DIR)) {
     fs.mkdirSync(LOGS_DIR, { recursive: true });
 }
@@ -46,16 +47,16 @@ function log(type, message, data = null) {
         START: '🚀',
         STOP: '🛑',
         CONNECT: '🔌',
-        CHAT: '💬'
+        CHAT: '💬',
+        HEALTH: '💚',
+        PING: '🏓'
     };
     
     const icon = icons[type] || '📝';
     const logMessage = `[${time}] ${icon} [${type}] ${message}`;
     
-    // В консоль
     console.log(logMessage);
     
-    // В файл
     let fileMessage = `[${time}] [${type}] ${message}`;
     if (data) {
         fileMessage += '\n' + JSON.stringify(data, null, 2);
@@ -74,6 +75,55 @@ const processedMessages = new Set();
 let totalProcessed = 0;
 let totalSkipped = 0;
 let totalLeads = 0;
+let botStartTime = new Date();
+let lastActivity = new Date();
+
+// ==========================================
+// ВЕБ-СЕРВЕР ДЛЯ TIMEWEB
+// ==========================================
+const server = http.createServer((req, res) => {
+    if (req.url === '/health' || req.url === '/') {
+        const uptime = Math.floor((new Date() - botStartTime) / 1000);
+        const hours = Math.floor(uptime / 3600);
+        const minutes = Math.floor((uptime % 3600) / 60);
+        const seconds = uptime % 60;
+        
+        const healthData = {
+            status: 'running',
+            uptime: `${hours}ч ${minutes}м ${seconds}с`,
+            totalLeads: totalLeads,
+            totalProcessed: totalProcessed,
+            totalSkipped: totalSkipped,
+            lastActivity: lastActivity.toLocaleString('ru-RU'),
+            memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`
+        };
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(healthData, null, 2));
+        
+        log('HEALTH', `Health check: ${req.url}`);
+    } else {
+        res.writeHead(404);
+        res.end('Not Found');
+    }
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+    log('SUCCESS', `Веб-сервер запущен на порту ${PORT}`);
+    log('INFO', `Health check: http://localhost:${PORT}/health`);
+});
+
+// ==========================================
+// ПИНГ ДЛЯ ПОДДЕРЖАНИЯ СОЕДИНЕНИЯ
+// ==========================================
+setInterval(() => {
+    const now = new Date();
+    const idleTime = Math.floor((now - lastActivity) / 1000);
+    
+    if (idleTime > 300) {
+        log('PING', `Бот жив. Простой: ${idleTime}с. Лидов: ${totalLeads}`);
+    }
+}, 300000); // Каждые 5 минут
 
 // ==========================================
 // ФУНКЦИИ
@@ -182,113 +232,88 @@ ${text.substring(0, 500)}${text.length > 500 ? '...' : ''}
 }
 
 // ==========================================
-// ЗАПУСК
+// ОСНОВНАЯ ЛОГИКА
 // ==========================================
 
-async function main() {
+async function startBot() {
     log('START', 'Запуск юзербота LeadSystem...');
-    log('INFO', `Версия gramJS запущена`);
     
-    // Проверяем сессию
     if (!SESSION_STRING || SESSION_STRING.length < 10) {
-        log('ERROR', 'SESSION_STRING не найдена в переменных окружения!');
-        log('ERROR', 'Добавь SESSION_STRING в настройках приложения');
+        log('ERROR', 'SESSION_STRING не найдена!');
         process.exit(1);
     }
     
     const stringSession = new StringSession(SESSION_STRING);
-    log('INFO', 'Сессия загружена из переменной окружения');
+    log('INFO', 'Сессия загружена');
     
     const client = new TelegramClient(stringSession, API_ID, API_HASH, {
-        connectionRetries: 5,
+        connectionRetries: 10,
+        retryDelay: 5000,
+        autoReconnect: true,
     });
     
-    log('CONNECT', 'Подключение к серверам Telegram...');
+    log('CONNECT', 'Подключение к Telegram...');
     
     try {
         await client.connect();
-        log('SUCCESS', 'Подключение установлено успешно');
+        log('SUCCESS', 'Подключено к серверам Telegram');
     } catch (err) {
         log('ERROR', `Ошибка подключения: ${err.message}`);
-        process.exit(1);
+        log('INFO', 'Повторная попытка через 10 секунд...');
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        return startBot();
     }
     
-    // Проверяем авторизацию
     const me = await client.getMe();
-    log('SUCCESS', `Авторизован как: ${me.firstName || ''} ${me.lastName || ''} (@${me.username || 'нет'})`);
-    log('SUCCESS', `ID пользователя: ${me.id}`);
+    log('SUCCESS', `Авторизован: ${me.firstName || ''} ${me.lastName || ''} (@${me.username || 'нет'})`);
     
     log('START', '========================================');
-    log('START', '✅ ЮЗЕРБОТ ЗАПУЩЕН И МОНИТОРИТ ЧАТЫ');
+    log('START', '✅ БОТ ЗАПУЩЕН И МОНИТОРИТ ЧАТЫ');
     log('START', '========================================');
-    log('INFO', 'Лиды приходят в Избранное (Saved Messages)');
-    log('INFO', 'Команды в Избранном: /stats, /last, /today');
-    log('INFO', `Логи сохраняются в: ${LOG_FILE}`);
     
-    // ==========================================
-    // ОБРАБОТЧИК СООБЩЕНИЙ
-    // ==========================================
+    lastActivity = new Date();
     
+    // Обработчик новых сообщений
     client.addEventHandler(async (event) => {
         try {
             const message = event.message;
             
-            // Пропускаем свои сообщения
-            if (message.out) {
-                return;
-            }
+            if (message.out) return;
             
             totalProcessed++;
+            lastActivity = new Date();
             
-            // Текст сообщения
             const text = message.message || '';
             
-            if (!text || text.length < 15) {
-                return;
-            }
+            if (!text || text.length < 15) return;
             
-            // Защита от повторов
             const chatId = message.chatId?.toString() || '';
             const msgHash = text.substring(0, 100) + chatId;
             
-            if (processedMessages.has(msgHash)) {
-                return;
-            }
+            if (processedMessages.has(msgHash)) return;
             processedMessages.add(msgHash);
             
             if (processedMessages.size > 10000) {
-                log('INFO', 'Очистка кеша обработанных сообщений (10000+)');
+                log('INFO', 'Очистка кеша сообщений');
                 processedMessages.clear();
             }
             
-            // Проверка ключевых слов
             const textLower = text.toLowerCase();
             
             const foundPrimary = PRIMARY_KEYWORDS.filter(word => textLower.includes(word));
             const foundSecondary = SECONDARY_KEYWORDS.filter(word => textLower.includes(word));
             
-            const hasPrimary = foundPrimary.length > 0;
-            const hasSecondary = foundSecondary.length > 0;
+            if (foundPrimary.length === 0 && foundSecondary.length === 0) return;
             
-            if (!hasPrimary && !hasSecondary) {
-                return;
-            }
-            
-            // Получаем информацию о чате ДО проверки на клиента
             let chatName = 'Неизвестный чат';
-            
             try {
                 const chat = await message.getChat();
                 chatName = chat.title || `${chat.firstName || ''} ${chat.lastName || ''}`.trim() || 'Личный чат';
-            } catch (e) {
-                chatName = 'Неизвестный чат';
-            }
+            } catch (e) {}
             
-            // Логируем совпадение ключевых слов
             const matchedWords = [...foundPrimary, ...foundSecondary].join(', ');
-            log('CHAT', `Найдены ключевые слова в чате "${chatName}": ${matchedWords}`);
+            log('CHAT', `Ключевые слова в "${chatName}": ${matchedWords}`);
             
-            // Проверка на клиента
             const { isClient, reason, score } = isRealClient(text);
             
             if (!isClient) {
@@ -296,15 +321,13 @@ async function main() {
                 log('SKIP', `Пропущено (${chatName}): ${reason}`, {
                     chat: chatName,
                     score: score,
-                    text: text.substring(0, 100),
-                    matchedWords: matchedWords
+                    text: text.substring(0, 100)
                 });
                 return;
             }
             
             totalLeads++;
             
-            // Получаем детальную информацию
             let chatLink = '';
             let senderName = 'Неизвестный';
             let senderUsername = 'нет';
@@ -321,46 +344,37 @@ async function main() {
                     chatLink = `чат ID: ${chat.id}`;
                     msgLink = `https://t.me/c/${chat.id.toString().replace('-100', '')}/${message.id}`;
                 }
-            } catch (e) {
-                log('ERROR', `Ошибка получения чата: ${e.message}`);
-            }
+            } catch (e) {}
             
             try {
                 const sender = await message.getSender();
                 senderName = `${sender.firstName || ''} ${sender.lastName || ''}`.trim() || 'Неизвестный';
                 senderUsername = sender.username ? `@${sender.username}` : 'нет';
-            } catch (e) {
-                log('ERROR', `Ошибка получения отправителя: ${e.message}`);
-            }
+            } catch (e) {}
             
             const contacts = extractContacts(text);
             const city = detectCity(text);
             const urgency = detectUrgency(text);
             
-            // Формируем лид
             const leadMessage = formatLead(
                 chatName, chatLink, senderName, senderUsername,
                 text, contacts, city, urgency, reason, msgLink
             );
             
-            // Отправляем в Избранное
             try {
                 await client.sendMessage('me', { message: leadMessage });
-                log('LEAD', `✅ ЛИД ОТПРАВЛЕН!`, {
+                log('LEAD', `✅ ЛИД!`, {
                     chat: chatName,
                     sender: senderName,
                     urgency: urgency,
                     city: city,
                     contacts: contacts,
-                    score: score,
-                    matchedWords: matchedWords,
-                    messageLink: msgLink
+                    score: score
                 });
             } catch (e) {
-                log('ERROR', `Ошибка отправки лида: ${e.message}`);
+                log('ERROR', `Ошибка отправки: ${e.message}`);
             }
             
-            // Сохраняем статистику
             leadsHistory.push({
                 date: new Date(),
                 chat: chatName,
@@ -374,20 +388,15 @@ async function main() {
             chatStats[chatName] = (chatStats[chatName] || 0) + 1;
             
         } catch (error) {
-            log('ERROR', `Критическая ошибка обработки: ${error.message}`);
-            log('ERROR', error.stack);
+            log('ERROR', `Ошибка обработки: ${error.message}`);
         }
     }, new NewMessage({}));
     
-    // ==========================================
-    // КОМАНДЫ
-    // ==========================================
-    
+    // Команды
     client.addEventHandler(async (event) => {
         const message = event.message;
         const text = message.message || '';
         
-        // /stats
         if (text === '/stats') {
             const total = leadsHistory.length;
             const today = leadsHistory.filter(l => {
@@ -396,97 +405,68 @@ async function main() {
                 return leadDate.toDateString() === now.toDateString();
             }).length;
             const high = leadsHistory.filter(l => l.urgency.includes('HIGH')).length;
-            const medium = leadsHistory.filter(l => l.urgency.includes('MEDIUM')).length;
-            const low = leadsHistory.filter(l => l.urgency.includes('LOW')).length;
+            
+            const uptime = Math.floor((new Date() - botStartTime) / 1000);
+            const hours = Math.floor(uptime / 3600);
+            const minutes = Math.floor((uptime % 3600) / 60);
             
             let stats = `📊 СТАТИСТИКА\n\n`;
+            stats += `⏱ Аптайм: ${hours}ч ${minutes}м\n`;
             stats += `🔴 Срочных: ${high}\n`;
-            stats += `🟡 Средних: ${medium}\n`;
-            stats += `🟢 Низких: ${low}\n`;
-            stats += `📝 Всего лидов: ${total}\n`;
+            stats += `📝 Всего: ${total}\n`;
             stats += `📅 Сегодня: ${today}\n`;
-            stats += `👀 Проверено сообщений: ${totalProcessed}\n`;
-            stats += `⏭️ Пропущено: ${totalSkipped}\n\n`;
-            stats += `📈 ТОП-10 ЧАТОВ:\n`;
+            stats += `👀 Проверено: ${totalProcessed}\n\n`;
+            stats += `📈 ТОП-5 ЧАТОВ:\n`;
             
-            const sortedChats = Object.entries(chatStats)
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 10);
+            const sorted = Object.entries(chatStats).sort((a, b) => b[1] - a[1]).slice(0, 5);
             
-            if (sortedChats.length === 0) {
+            if (sorted.length === 0) {
                 stats += `(пока пусто)\n`;
             } else {
-                sortedChats.forEach(([chat, count]) => {
-                    stats += `• ${chat}: ${count} лидов\n`;
+                sorted.forEach(([chat, count]) => {
+                    stats += `• ${chat}: ${count}\n`;
                 });
             }
             
             await message.reply({ message: stats });
-            log('STATS', `Запрошена статистика`);
+            log('STATS', 'Статистика отправлена');
         }
         
-        // /last
         if (text === '/last') {
             if (leadsHistory.length === 0) {
                 await message.reply({ message: '📭 Лидов пока нет' });
                 return;
             }
             
-            const recent = leadsHistory.slice(-10).reverse();
-            let result = `📋 ПОСЛЕДНИЕ 10 ЛИДОВ:\n\n`;
+            const recent = leadsHistory.slice(-5).reverse();
+            let result = `📋 ПОСЛЕДНИЕ 5:\n\n`;
             
             recent.forEach((l, i) => {
                 const time = new Date(l.date).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-                result += `${i + 1}. 🕐 ${time} | ${l.urgency} | ${l.chat}\n`;
-                result += `   👤 ${l.sender}: ${l.text}\n`;
-                if (l.contacts && l.contacts !== 'нет') {
-                    result += `   📞 ${l.contacts}\n`;
-                }
-                result += `\n`;
+                result += `${i + 1}. ${time} | ${l.urgency} | ${l.chat}\n   ${l.sender}: ${l.text}\n\n`;
             });
             
             await message.reply({ message: result });
-            log('INFO', 'Отправлен список последних 10 лидов');
         }
         
-        // /today
-        if (text === '/today') {
-            const today = leadsHistory.filter(l => {
-                const leadDate = new Date(l.date);
-                const now = new Date();
-                return leadDate.toDateString() === now.toDateString();
-            });
-            
-            if (today.length === 0) {
-                await message.reply({ message: '📭 Сегодня лидов нет' });
-                return;
-            }
-            
-            let result = `📅 ЛИДЫ ЗА СЕГОДНЯ (${today.length}):\n\n`;
-            
-            today.reverse().forEach((l, i) => {
-                const time = new Date(l.date).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-                result += `${i + 1}. 🕐 ${time} | ${l.urgency} | ${l.chat}\n`;
-                result += `   👤 ${l.sender}\n`;
-                if (l.city && l.city !== 'не указан') {
-                    result += `   📍 ${l.city}\n`;
-                }
-                if (l.contacts && l.contacts !== 'нет') {
-                    result += `   📞 ${l.contacts}\n`;
-                }
-                result += `\n`;
-            });
-            
-            await message.reply({ message: result });
-            log('INFO', `Отправлены лиды за сегодня (${today.length})`);
+        if (text === '/ping') {
+            const now = new Date();
+            const ping = Math.floor((now - lastActivity) / 1000);
+            await message.reply({ message: `🏓 Понг! Последняя активность: ${ping}с назад` });
         }
         
     }, new NewMessage({ fromUsers: ['me'] }));
     
-    log('SUCCESS', 'Обработчики событий добавлены');
-    log('SUCCESS', '========================================');
     log('SUCCESS', '✅ БОТ ГОТОВ К РАБОТЕ');
-    log('SUCCESS', '========================================');
+    
+    // Обработка отключений
+    client.on('disconnected', () => {
+        log('ERROR', 'Соединение потеряно! Попытка переподключения...');
+    });
+    
+    client.on('reconnecting', () => {
+        log('INFO', 'Переподключение к Telegram...');
+    });
 }
 
 // ==========================================
@@ -494,21 +474,23 @@ async function main() {
 // ==========================================
 
 process.on('uncaughtException', (error) => {
-    log('ERROR', `Необработанное исключение: ${error.message}`);
+    log('ERROR', `Исключение: ${error.message}`);
     log('ERROR', error.stack);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-    log('ERROR', `Необработанный reject: ${reason}`);
+process.on('unhandledRejection', (reason) => {
+    log('ERROR', `Reject: ${reason}`);
 });
 
 process.on('SIGINT', () => {
-    log('STOP', 'Получен сигнал завершения (SIGINT)');
+    log('STOP', 'SIGINT');
+    server.close();
     process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-    log('STOP', 'Получен сигнал завершения (SIGTERM)');
+    log('STOP', 'SIGTERM');
+    server.close();
     process.exit(0);
 });
 
@@ -516,8 +498,14 @@ process.on('SIGTERM', () => {
 // ЗАПУСК
 // ==========================================
 
-main().catch(err => {
-    log('ERROR', `Критическая ошибка при запуске: ${err.message}`);
+startBot().catch(err => {
+    log('ERROR', `Критическая ошибка: ${err.message}`);
     log('ERROR', err.stack);
-    process.exit(1);
+    log('INFO', 'Перезапуск через 30 секунд...');
+    setTimeout(() => {
+        startBot().catch(e => {
+            log('ERROR', `Повторная ошибка: ${e.message}`);
+            process.exit(1);
+        });
+    }, 30000);
 });
