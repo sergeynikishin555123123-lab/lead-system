@@ -278,7 +278,9 @@ async function startBot() {
                 const message = event.message;
                 
                 if (message.out) return;
-                
+                // Игнорируем чаты из списка
+const IGNORE_CHATS = require('./filters').IGNORE_CHATS;
+if (IGNORE_CHATS.includes(Number(message.chatId))) return;
                 totalProcessed++;
                 
                 const text = message.message || '';
