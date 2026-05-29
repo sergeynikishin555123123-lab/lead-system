@@ -20,7 +20,6 @@ const {
 const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
 const SESSION_STRING = process.env.SESSION_STRING || '';
-const PORT = process.env.PORT || 3000;
 
 // ==========================================
 // ПАПКА ДЛЯ ЛОГОВ
@@ -32,19 +31,13 @@ if (!fs.existsSync(LOGS_DIR)) {
 
 const LOG_FILE = path.join(LOGS_DIR, `bot-${new Date().toISOString().split('T')[0]}.log`);
 
-// ==========================================
-// ЛОГИРОВАНИЕ
-// ==========================================
 function log(type, message, data = null) {
     const now = new Date();
     const time = now.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
     
     const logMessage = `[${time}] [${type}] ${message}`;
-    
-    // Всегда в консоль
     console.log(logMessage);
     
-    // В файл
     let fileMessage = `[${time}] [${type}] ${message}`;
     if (data) {
         fileMessage += '\n' + JSON.stringify(data, null, 2);
@@ -53,9 +46,7 @@ function log(type, message, data = null) {
     
     try {
         fs.appendFileSync(LOG_FILE, fileMessage);
-    } catch (e) {
-        console.error('Ошибка записи в лог:', e.message);
-    }
+    } catch (e) {}
 }
 
 // ==========================================
@@ -70,41 +61,72 @@ let totalLeads = 0;
 const botStartTime = new Date();
 
 // ==========================================
-// ВЕБ-СЕРВЕР (ЗАПУСКАЕТСЯ ПЕРВЫМ!)
+// ВЕБ-СЕРВЕР С АВТО-ВЫБОРОМ ПОРТА
 // ==========================================
 
-const server = http.createServer((req, res) => {
-    const uptime = Math.floor((new Date() - botStartTime) / 1000);
-    const hours = Math.floor(uptime / 3600);
-    const minutes = Math.floor((uptime % 3600) / 60);
-    const seconds = uptime % 60;
-    
-    const healthData = {
-        status: 'running',
-        uptime: `${hours}ч ${minutes}м ${seconds}с`,
-        totalLeads: totalLeads,
-        totalProcessed: totalProcessed,
-        totalSkipped: totalSkipped,
-        memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`
-    };
-    
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(healthData, null, 2));
-});
+function tryPort(port) {
+    return new Promise((resolve, reject) => {
+        const server = http.createServer((req, res) => {
+            const uptime = Math.floor((new Date() - botStartTime) / 1000);
+            const hours = Math.floor(uptime / 3600);
+            const minutes = Math.floor((uptime % 3600) / 60);
+            const seconds = uptime % 60;
+            
+            const healthData = {
+                status: 'running',
+                uptime: `${hours}ч ${minutes}м ${seconds}с`,
+                totalLeads: totalLeads,
+                totalProcessed: totalProcessed,
+                totalSkipped: totalSkipped,
+                memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
+                port: port
+            };
+            
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify(healthData, null, 2));
+        });
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`========================================`);
-    console.log(`✅ ВЕБ-СЕРВЕР ЗАПУЩЕН НА ПОРТУ ${PORT}`);
-    console.log(`Health check: http://0.0.0.0:${PORT}`);
-    console.log(`========================================`);
-    log('SUCCESS', `Веб-сервер запущен на порту ${PORT}`);
-});
+        server.on('error', (err) => {
+            if (err.code === 'EADDRINUSE') {
+                server.close();
+                reject(err);
+            } else {
+                reject(err);
+            }
+        });
 
-// Обработка ошибок сервера
-server.on('error', (err) => {
-    console.error(`❌ Ошибка сервера: ${err.message}`);
-    log('ERROR', `Ошибка сервера: ${err.message}`);
-});
+        server.listen(port, '0.0.0.0', () => {
+            console.log(`✅ Сервер запущен на порту ${port}`);
+            log('SUCCESS', `Веб-сервер на порту ${port}`);
+            resolve(server);
+        });
+    });
+}
+
+async function startServer() {
+    // Пробуем порты от 3000 до 3010
+    const ports = [3000, 3001, 3002, 3003, 3004, 3005, 3006, 3007, 3008, 3009, 3010];
+    
+    // Добавляем PORT из переменной если есть
+    if (process.env.PORT) {
+        ports.unshift(parseInt(process.env.PORT));
+    }
+    
+    for (const port of ports) {
+        try {
+            const server = await tryPort(port);
+            return server;
+        } catch (err) {
+            if (err.code === 'EADDRINUSE') {
+                console.log(`Порт ${port} занят, пробуем следующий...`);
+                continue;
+            }
+            throw err;
+        }
+    }
+    
+    throw new Error('Не удалось найти свободный порт');
+}
 
 // ==========================================
 // ФУНКЦИИ
@@ -248,7 +270,7 @@ async function startBot() {
         log('SUCCESS', `Авторизован: ${userName}`);
         
         console.log('✅ БОТ ЗАПУЩЕН И МОНИТОРИТ ЧАТЫ');
-        log('START', '✅ БОТ ЗАПУЩЕН');
+        log('START', 'БОТ ЗАПУЩЕН');
         
         // Обработчик сообщений
         client.addEventHandler(async (event) => {
@@ -430,8 +452,7 @@ async function startBot() {
         console.error(`❌ Ошибка: ${err.message}`);
         log('ERROR', `Ошибка запуска: ${err.message}`);
         
-        // Пробуем переподключиться
-        console.log('🔄 Повторная попытка через 10 секунд...');
+        console.log('🔄 Повтор через 10 секунд...');
         setTimeout(() => {
             startBot().catch(e => console.error('Ошибка:', e.message));
         }, 10000);
@@ -442,30 +463,34 @@ async function startBot() {
 // ЗАПУСК
 // ==========================================
 
-console.log('========================================');
-console.log('🚀 ЗАПУСК ПРИЛОЖЕНИЯ');
-console.log('========================================');
-
-// Запускаем бота
-startBot().catch(err => {
-    console.error('Критическая ошибка:', err.message);
-    log('ERROR', `Критическая ошибка: ${err.message}`);
-});
+(async () => {
+    console.log('🚀 ЗАПУСК ПРИЛОЖЕНИЯ');
+    
+    // Сначала запускаем сервер на любом свободном порту
+    try {
+        await startServer();
+    } catch (err) {
+        console.error('❌ Не удалось запустить сервер:', err.message);
+    }
+    
+    // Потом бота
+    startBot().catch(err => {
+        console.error('Критическая ошибка:', err.message);
+    });
+})();
 
 // Поддержание процесса
 process.on('SIGTERM', () => {
-    console.log('Получен SIGTERM');
-    server.close();
+    console.log('SIGTERM');
     process.exit(0);
 });
 
 process.on('SIGINT', () => {
-    console.log('Получен SIGINT');
-    server.close();
+    console.log('SIGINT');
     process.exit(0);
 });
 
 // Каждые 5 минут пишем что живы
 setInterval(() => {
-    console.log(`💚 Бот жив. Лидов: ${totalLeads}, Проверено: ${totalProcessed}`);
+    console.log(`💚 Жив. Лидов: ${totalLeads}, Проверено: ${totalProcessed}`);
 }, 300000);
