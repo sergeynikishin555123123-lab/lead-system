@@ -11,7 +11,8 @@ const {
     STOP_WORDS,
     URGENCY_KEYWORDS,
     CITIES,
-    CLIENT_MARKERS
+    CLIENT_MARKERS,
+    IGNORE_CHATS
 } = require('./filters');
 
 // ==========================================
@@ -20,6 +21,11 @@ const {
 const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
 const SESSION_STRING = process.env.SESSION_STRING || '';
+
+// Прокси для обхода блокировки (MTProto прокси)
+const PROXY_SERVER = process.env.PROXY_SERVER || '';
+const PROXY_PORT = parseInt(process.env.PROXY_PORT || '0');
+const PROXY_SECRET = process.env.PROXY_SECRET || '';
 
 // ==========================================
 // ПАПКА ДЛЯ ЛОГОВ
@@ -61,7 +67,7 @@ let totalLeads = 0;
 const botStartTime = new Date();
 
 // ==========================================
-// ВЕБ-СЕРВЕР С АВТО-ВЫБОРОМ ПОРТА
+// ВЕБ-СЕРВЕР
 // ==========================================
 
 function tryPort(port) {
@@ -96,7 +102,7 @@ function tryPort(port) {
         });
 
         server.listen(port, '0.0.0.0', () => {
-            console.log(`✅ Сервер запущен на порту ${port}`);
+            console.log(`✅ Сервер на порту ${port}`);
             log('SUCCESS', `Веб-сервер на порту ${port}`);
             resolve(server);
         });
@@ -104,10 +110,8 @@ function tryPort(port) {
 }
 
 async function startServer() {
-    // Пробуем порты от 3000 до 3010
     const ports = [3000, 3001, 3002, 3003, 3004, 3005, 3006, 3007, 3008, 3009, 3010];
     
-    // Добавляем PORT из переменной если есть
     if (process.env.PORT) {
         ports.unshift(parseInt(process.env.PORT));
     }
@@ -118,14 +122,14 @@ async function startServer() {
             return server;
         } catch (err) {
             if (err.code === 'EADDRINUSE') {
-                console.log(`Порт ${port} занят, пробуем следующий...`);
+                console.log(`Порт ${port} занят...`);
                 continue;
             }
             throw err;
         }
     }
     
-    throw new Error('Не удалось найти свободный порт');
+    throw new Error('Нет свободных портов');
 }
 
 // ==========================================
@@ -250,10 +254,29 @@ async function startBot() {
     
     const stringSession = new StringSession(SESSION_STRING);
     
-    const client = new TelegramClient(stringSession, API_ID, API_HASH, {
+    // Настройки подключения с прокси
+    const clientOptions = {
         connectionRetries: 10,
         retryDelay: 5000,
-    });
+    };
+    
+    // Если указан прокси — добавляем
+    if (PROXY_SERVER && PROXY_PORT) {
+        console.log(`🔁 Использую прокси: ${PROXY_SERVER}:${PROXY_PORT}`);
+        log('INFO', `Прокси: ${PROXY_SERVER}:${PROXY_PORT}`);
+        
+        clientOptions.proxy = {
+            ip: PROXY_SERVER,
+            port: PROXY_PORT,
+            socksType: 5,
+        };
+        
+        if (PROXY_SECRET) {
+            clientOptions.proxy.password = PROXY_SECRET;
+        }
+    }
+    
+    const client = new TelegramClient(stringSession, API_ID, API_HASH, clientOptions);
     
     try {
         console.log('🔌 Подключение к Telegram...');
@@ -278,9 +301,12 @@ async function startBot() {
                 const message = event.message;
                 
                 if (message.out) return;
+                
                 // Игнорируем чаты из списка
-const IGNORE_CHATS = require('./filters').IGNORE_CHATS;
-if (IGNORE_CHATS.includes(Number(message.chatId))) return;
+                if (IGNORE_CHATS && IGNORE_CHATS.length > 0) {
+                    if (IGNORE_CHATS.includes(Number(message.chatId))) return;
+                }
+                
                 totalProcessed++;
                 
                 const text = message.message || '';
@@ -454,10 +480,10 @@ if (IGNORE_CHATS.includes(Number(message.chatId))) return;
         console.error(`❌ Ошибка: ${err.message}`);
         log('ERROR', `Ошибка запуска: ${err.message}`);
         
-        console.log('🔄 Повтор через 10 секунд...');
+        console.log('🔄 Повтор через 15 секунд...');
         setTimeout(() => {
             startBot().catch(e => console.error('Ошибка:', e.message));
-        }, 10000);
+        }, 15000);
     }
 }
 
@@ -468,31 +494,20 @@ if (IGNORE_CHATS.includes(Number(message.chatId))) return;
 (async () => {
     console.log('🚀 ЗАПУСК ПРИЛОЖЕНИЯ');
     
-    // Сначала запускаем сервер на любом свободном порту
     try {
         await startServer();
     } catch (err) {
-        console.error('❌ Не удалось запустить сервер:', err.message);
+        console.error('❌ Сервер:', err.message);
     }
     
-    // Потом бота
     startBot().catch(err => {
         console.error('Критическая ошибка:', err.message);
     });
 })();
 
-// Поддержание процесса
-process.on('SIGTERM', () => {
-    console.log('SIGTERM');
-    process.exit(0);
-});
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
 
-process.on('SIGINT', () => {
-    console.log('SIGINT');
-    process.exit(0);
-});
-
-// Каждые 5 минут пишем что живы
 setInterval(() => {
-    console.log(`💚 Жив. Лидов: ${totalLeads}, Проверено: ${totalProcessed}`);
+    console.log(`💚 Жив. Лидов: ${totalLeads}`);
 }, 300000);
