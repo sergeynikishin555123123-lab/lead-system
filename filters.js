@@ -232,7 +232,7 @@ module.exports = {
     'монтаж',
     'инженерка',
     'инженерные сети'
-];
+};
 
 const SECONDARY_KEYWORDS = [
     'коротнул',
