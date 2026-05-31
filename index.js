@@ -162,13 +162,28 @@ async function startBot() {
         return;
     }
 
-    const stringSession = new StringSession(SESSION_STRING);
+   const PROXY_SERVER = process.env.PROXY_SERVER || '';
+const PROXY_PORT = parseInt(process.env.PROXY_PORT || '0');
+const PROXY_SECRET = process.env.PROXY_SECRET || '';
 
-    const client = new TelegramClient(stringSession, API_ID, API_HASH, {
-        connectionRetries: 10,
-        retryDelay: 5000,
-    });
+const clientOptions = {
+    connectionRetries: 10,
+    retryDelay: 5000,
+};
 
+if (PROXY_SERVER && PROXY_PORT) {
+    console.log(`🔁 Прокси: ${PROXY_SERVER}:${PROXY_PORT}`);
+    clientOptions.proxy = {
+        ip: PROXY_SERVER,
+        port: PROXY_PORT,
+        socksType: 5,
+    };
+    if (PROXY_SECRET) {
+        clientOptions.proxy.password = PROXY_SECRET;
+    }
+}
+
+const client = new TelegramClient(stringSession, API_ID, API_HASH, clientOptions);
     try {
         console.log('🔌 Подключение к Telegram...');
         await client.connect();
