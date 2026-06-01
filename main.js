@@ -5,6 +5,7 @@ const { NewMessage } = require('telegram/events');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { exec } = require('child_process');
 const {
     PRIMARY_KEYWORDS,
     SECONDARY_KEYWORDS,
@@ -20,25 +21,39 @@ const {
 const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
 const SESSION_STRING = process.env.SESSION_STRING || '';
+const PORT = parseInt(process.env.PORT) || 8080;
 
 // ==========================================
-// ПАПКА ДЛЯ ЛОГОВ - FIX для Timeweb (без прав на запись)
+// ФУНКЦИЯ ОСВОБОЖДЕНИЯ ПОРТА
 // ==========================================
-let LOGS_DIR = null;
-let LOG_FILE = null;
+function killProcessOnPort(port) {
+    return new Promise((resolve) => {
+        console.log(`🔍 Проверяю порт ${port}...`);
+        const command = `lsof -ti:${port} | xargs kill -9 2>/dev/null || true`;
+        exec(command, (error, stdout, stderr) => {
+            if (stdout && stdout.trim()) {
+                console.log(`✅ Убит процесс на порту ${port}`);
+            }
+            setTimeout(resolve, 1000);
+        });
+    });
+}
 
-// Пытаемся создать директорию для логов, но не падаем при ошибке
+// ==========================================
+// ПАПКА ДЛЯ ЛОГОВ - ТОЛЬКО /tmp (без прав на запись в /app)
+// ==========================================
+// НЕ ИСПОЛЬЗУЕМ __dirname и /app/logs - только /tmp
+const LOGS_DIR = '/tmp/lead-logs';
+const LOG_FILE = path.join(LOGS_DIR, `bot-${new Date().toISOString().split('T')[0]}.log`);
+
+// Создаем папку в /tmp (она точно доступна)
 try {
-    LOGS_DIR = '/tmp/lead-logs';
     if (!fs.existsSync(LOGS_DIR)) {
         fs.mkdirSync(LOGS_DIR, { recursive: true });
     }
-    LOG_FILE = path.join(LOGS_DIR, `bot-${new Date().toISOString().split('T')[0]}.log`);
     console.log('✅ Логи будут писаться в /tmp/lead-logs');
 } catch (error) {
     console.warn('⚠️ Не могу создать папку для логов, пишу только в консоль');
-    LOGS_DIR = null;
-    LOG_FILE = null;
 }
 
 function log(type, message, data = null) {
@@ -53,18 +68,18 @@ function log(type, message, data = null) {
     }
     console.log('-'.repeat(80));
     
-    // Пытаемся записать в файл только если это возможно
-    if (LOG_FILE) {
-        try {
+    // Пытаемся записать в файл
+    try {
+        if (fs.existsSync(LOGS_DIR)) {
             let fileMessage = `[${time}] [${type}] ${message}`;
             if (data) {
                 fileMessage += '\n' + JSON.stringify(data, null, 2);
             }
             fileMessage += '\n' + '-'.repeat(80) + '\n';
             fs.appendFileSync(LOG_FILE, fileMessage);
-        } catch (e) {
-            // Молча игнорируем ошибку файловой системы
         }
+    } catch (e) {
+        // Игнорируем ошибки записи
     }
 }
 
@@ -80,46 +95,54 @@ let totalLeads = 0;
 const botStartTime = new Date();
 
 // ==========================================
-// ВЕБ-СЕРВЕР - упрощенная версия без конфликтов портов
+// ВЕБ-СЕРВЕР
 // ==========================================
 
-const PORT = process.env.PORT || 8080;
-let serverRunning = false;
+let server = null;
 
-const server = http.createServer((req, res) => {
-    const uptime = Math.floor((new Date() - botStartTime) / 1000);
-    const hours = Math.floor(uptime / 3600);
-    const minutes = Math.floor((uptime % 3600) / 60);
-    const seconds = uptime % 60;
+async function startServer() {
+    await killProcessOnPort(PORT);
     
-    const healthData = {
-        status: 'running',
-        uptime: `${hours}ч ${minutes}м ${seconds}с`,
-        totalLeads: totalLeads,
-        totalProcessed: totalProcessed,
-        totalSkipped: totalSkipped,
-        memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
-        port: PORT
-    };
-    
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(healthData, null, 2));
-});
+    return new Promise((resolve, reject) => {
+        server = http.createServer((req, res) => {
+            const uptime = Math.floor((new Date() - botStartTime) / 1000);
+            const hours = Math.floor(uptime / 3600);
+            const minutes = Math.floor((uptime % 3600) / 60);
+            const seconds = uptime % 60;
+            
+            const healthData = {
+                status: 'running',
+                uptime: `${hours}ч ${minutes}м ${seconds}с`,
+                totalLeads: totalLeads,
+                totalProcessed: totalProcessed,
+                totalSkipped: totalSkipped,
+                memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
+                port: PORT,
+                pid: process.pid
+            };
+            
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify(healthData, null, 2));
+        });
 
-server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-        console.log(`⚠️ Порт ${PORT} уже занят, веб-сервер не запущен`);
-        serverRunning = false;
-    } else {
-        console.error('Ошибка сервера:', err.message);
-    }
-});
+        server.on('error', (err) => {
+            if (err.code === 'EADDRINUSE') {
+                console.log(`⚠️ Порт ${PORT} занят, убиваем процесс...`);
+                killProcessOnPort(PORT).then(() => {
+                    server.listen(PORT, '0.0.0.0');
+                });
+            } else {
+                reject(err);
+            }
+        });
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Веб-сервер запущен на порту ${PORT}`);
-    serverRunning = true;
-    log('SUCCESS', `Веб-сервер на порту ${PORT}`);
-});
+        server.listen(PORT, '0.0.0.0', () => {
+            console.log(`✅ Веб-сервер запущен на порту ${PORT} (PID: ${process.pid})`);
+            log('SUCCESS', `Веб-сервер на порту ${PORT}`);
+            resolve(server);
+        });
+    });
+}
 
 // ==========================================
 // ФУНКЦИИ
@@ -265,25 +288,18 @@ async function startBot() {
         console.log('✅ БОТ ЗАПУЩЕН И МОНИТОРИТ ЧАТЫ');
         log('START', 'БОТ ЗАПУЩЕН');
         
-        // ==========================================
         // ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ
-        // ==========================================
         client.addEventHandler(async (event) => {
             try {
                 const message = event.message;
                 
-                // Пропускаем свои сообщения
                 if (message.out) return;
                 
                 const text = message.message || '';
                 
-                // Пропускаем команды (начинаются с /)
                 if (text.startsWith('/')) return;
-                
-                // Пропускаем слишком короткие сообщения
                 if (!text || text.length < 15) return;
                 
-                // Увеличиваем счетчик ТОЛЬКО для чужих сообщений
                 totalProcessed++;
                 
                 const chatId = message.chatId?.toString() || '';
@@ -385,9 +401,7 @@ async function startBot() {
             }
         }, new NewMessage({}));
         
-        // ==========================================
-        // ОБРАБОТЧИК КОМАНД (только свои сообщения)
-        // ==========================================
+        // ОБРАБОТЧИК КОМАНД
         client.addEventHandler(async (event) => {
             const message = event.message;
             const text = message.message || '';
@@ -410,7 +424,7 @@ async function startBot() {
                 stats += `🔴 Срочных: ${high}\n`;
                 stats += `📝 Всего лидов: ${total}\n`;
                 stats += `📅 Сегодня: ${today}\n`;
-                stats += `👀 Проверено сообщений: ${totalProcessed}\n`;
+                stats += `👀 Проверено: ${totalProcessed}\n`;
                 stats += `⏭️ Пропущено: ${totalSkipped}\n\n`;
                 stats += `📈 ТОП ЧАТОВ:\n`;
                 
@@ -420,7 +434,7 @@ async function startBot() {
                     stats += `(пока пусто)\n`;
                 } else {
                     sorted.forEach(([chat, count]) => {
-                        stats += `• ${chat}: ${count} лидов\n`;
+                        stats += `• ${chat}: ${count}\n`;
                     });
                 }
                 
@@ -429,16 +443,16 @@ async function startBot() {
             
             if (text === '/last') {
                 if (leadsHistory.length === 0) {
-                    await message.reply({ message: '📭 Лидов пока нет' });
+                    await message.reply({ message: '📭 Пусто' });
                     return;
                 }
                 
                 const recent = leadsHistory.slice(-5).reverse();
-                let result = `📋 ПОСЛЕДНИЕ 5 ЛИДОВ:\n\n`;
+                let result = `📋 ПОСЛЕДНИЕ 5:\n\n`;
                 
                 recent.forEach((l, i) => {
                     const time = new Date(l.date).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-                    result += `${i + 1}. ${time} | ${l.urgency} | ${l.chat}\n   ${l.sender}: ${l.text.substring(0, 50)}${l.text.length > 50 ? '...' : ''}\n\n`;
+                    result += `${i + 1}. ${time} | ${l.urgency} | ${l.chat}\n   ${l.sender}: ${l.text}\n\n`;
                 });
                 
                 await message.reply({ message: result });
@@ -455,18 +469,6 @@ async function startBot() {
                 leadsHistory.length = 0;
                 Object.keys(chatStats).forEach(key => delete chatStats[key]);
                 await message.reply({ message: '✅ Статистика сброшена!' });
-            }
-            
-            if (text === '/status') {
-                const memUsage = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-                await message.reply({ 
-                    message: `🤖 Статус бота:
-                    
-✅ Активен
-📊 Память: ${memUsage} MB
-📁 Логи: ${LOG_FILE ? 'в /tmp' : 'только консоль'}
-🔄 Перезапусков: ${process.uptime().toFixed(0)} сек`
-                });
             }
             
         }, new NewMessage({ fromUsers: ['me'] }));
@@ -492,6 +494,14 @@ async function startBot() {
 (async () => {
     console.log('🚀 ЗАПУСК ПРИЛОЖЕНИЯ');
     console.log(`📦 Node.js ${process.version}`);
+    console.log(`🆔 PID: ${process.pid}`);
+    
+    // Запускаем веб-сервер
+    try {
+        await startServer();
+    } catch (err) {
+        console.error('❌ Ошибка сервера:', err.message);
+    }
     
     // Запускаем бота
     startBot().catch(err => {
@@ -501,16 +511,18 @@ async function startBot() {
 
 // Поддержание процесса
 process.on('SIGTERM', () => {
-    console.log('📡 Получен SIGTERM');
-    process.exit(0);
+    console.log('📡 SIGTERM');
+    if (server) server.close(() => process.exit(0));
+    else process.exit(0);
 });
 
 process.on('SIGINT', () => {
-    console.log('📡 Получен SIGINT');
-    process.exit(0);
+    console.log('📡 SIGINT');
+    if (server) server.close(() => process.exit(0));
+    else process.exit(0);
 });
 
-// Каждые 5 минут пишем что живы
+// Каждые 5 минут статус
 setInterval(() => {
     const memUsage = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
     console.log(`💚 Жив. Лидов: ${totalLeads}, Проверено: ${totalProcessed}, RAM: ${memUsage}MB`);
