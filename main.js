@@ -61,34 +61,72 @@ let totalLeads = 0;
 const botStartTime = new Date();
 
 // ==========================================
-// ВЕБ-СЕРВЕР
+// ВЕБ-СЕРВЕР С АВТО-ВЫБОРОМ ПОРТА
 // ==========================================
 
-const PORT = process.env.PORT || 8080;
+function tryPort(port) {
+    return new Promise((resolve, reject) => {
+        const server = http.createServer((req, res) => {
+            const uptime = Math.floor((new Date() - botStartTime) / 1000);
+            const hours = Math.floor(uptime / 3600);
+            const minutes = Math.floor((uptime % 3600) / 60);
+            const seconds = uptime % 60;
+            
+            const healthData = {
+                status: 'running',
+                uptime: `${hours}ч ${minutes}м ${seconds}с`,
+                totalLeads: totalLeads,
+                totalProcessed: totalProcessed,
+                totalSkipped: totalSkipped,
+                memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
+                port: port
+            };
+            
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify(healthData, null, 2));
+        });
 
-const server = http.createServer((req, res) => {
-    const uptime = Math.floor((new Date() - botStartTime) / 1000);
-    const hours = Math.floor(uptime / 3600);
-    const minutes = Math.floor((uptime % 3600) / 60);
-    const seconds = uptime % 60;
-    
-    const healthData = {
-        status: 'running',
-        uptime: `${hours}ч ${minutes}м ${seconds}с`,
-        totalLeads: totalLeads,
-        totalProcessed: totalProcessed,
-        totalSkipped: totalSkipped,
-        memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`
-    };
-    
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(healthData, null, 2));
-});
+        server.on('error', (err) => {
+            if (err.code === 'EADDRINUSE') {
+                server.close();
+                reject(err);
+            } else {
+                reject(err);
+            }
+        });
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Сервер запущен на порту ${PORT}`);
-    log('SUCCESS', `Веб-сервер на порту ${PORT}`);
-});
+        server.listen(port, '0.0.0.0', () => {
+            console.log(`✅ Сервер запущен на порту ${port}`);
+            log('SUCCESS', `Веб-сервер на порту ${port}`);
+            resolve(server);
+        });
+    });
+}
+
+async function startServer() {
+    // Пробуем порты от 3000 до 3010
+    const ports = [3000, 3001, 3002, 3003, 3004, 3005, 3006, 3007, 3008, 3009, 3010];
+    
+    // Добавляем PORT из переменной если есть
+    if (process.env.PORT) {
+        ports.unshift(parseInt(process.env.PORT));
+    }
+    
+    for (const port of ports) {
+        try {
+            const server = await tryPort(port);
+            return server;
+        } catch (err) {
+            if (err.code === 'EADDRINUSE') {
+                console.log(`Порт ${port} занят, пробуем следующий...`);
+                continue;
+            }
+            throw err;
+        }
+    }
+    
+    throw new Error('Не удалось найти свободный порт');
+}
 
 // ==========================================
 // ФУНКЦИИ
@@ -213,8 +251,8 @@ async function startBot() {
     const stringSession = new StringSession(SESSION_STRING);
     
     const client = new TelegramClient(stringSession, API_ID, API_HASH, {
-        connectionRetries: 5,
-        retryDelay: 3000,
+        connectionRetries: 10,
+        retryDelay: 5000,
     });
     
     try {
@@ -272,7 +310,7 @@ async function startBot() {
                 const matchedWords = [...foundPrimary, ...foundSecondary].join(', ');
                 console.log(`💬 Ключевые слова в "${chatName}": ${matchedWords}`);
                 
-                const { isClient, reason } = isRealClient(text);
+                const { isClient, reason, score } = isRealClient(text);
                 
                 if (!isClient) {
                     totalSkipped++;
@@ -405,15 +443,6 @@ async function startBot() {
                 await message.reply({ message: '🏓 Понг! Бот работает!' });
             }
             
-            if (text === '/reset') {
-                totalProcessed = 0;
-                totalSkipped = 0;
-                totalLeads = 0;
-                leadsHistory.length = 0;
-                Object.keys(chatStats).forEach(key => delete chatStats[key]);
-                await message.reply({ message: '✅ Статистика сброшена!' });
-            }
-            
         }, new NewMessage({ fromUsers: ['me'] }));
         
         console.log('✅ ГОТОВ К РАБОТЕ');
@@ -436,6 +465,15 @@ async function startBot() {
 
 (async () => {
     console.log('🚀 ЗАПУСК ПРИЛОЖЕНИЯ');
+    
+    // Сначала запускаем сервер на любом свободном порту
+    try {
+        await startServer();
+    } catch (err) {
+        console.error('❌ Не удалось запустить сервер:', err.message);
+    }
+    
+    // Потом бота
     startBot().catch(err => {
         console.error('Критическая ошибка:', err.message);
     });
@@ -455,4 +493,4 @@ process.on('SIGINT', () => {
 // Каждые 5 минут пишем что живы
 setInterval(() => {
     console.log(`💚 Жив. Лидов: ${totalLeads}, Проверено: ${totalProcessed}`);
-}, 300000);
+}, 300000); 
