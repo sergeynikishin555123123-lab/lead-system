@@ -2,12 +2,13 @@
   "name": "lead-system",
   "version": "1.0.0",
   "description": "Telegram userbot for lead generation",
-  "main": "index.js",
+  "main": "main.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node main.js"
   },
   "dependencies": {
     "telegram": "^2.21.0",
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.3.1",
+    "input": "^1.0.1"
   }
 }
