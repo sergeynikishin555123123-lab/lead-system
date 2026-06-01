@@ -22,14 +22,22 @@ const API_HASH = process.env.API_HASH;
 const SESSION_STRING = process.env.SESSION_STRING || '';
 
 // ==========================================
-// ПАПКА ДЛЯ ЛОГОВ
+// ПАПКА ДЛЯ ЛОГОВ - FIX для Timeweb
 // ==========================================
-const LOGS_DIR = path.join(__dirname, 'logs');
-if (!fs.existsSync(LOGS_DIR)) {
-    fs.mkdirSync(LOGS_DIR, { recursive: true });
+let LOGS_DIR = process.env.LOGS_DIR || '/tmp/lead-logs';
+
+// Пытаемся создать директорию для логов
+try {
+    if (!fs.existsSync(LOGS_DIR)) {
+        fs.mkdirSync(LOGS_DIR, { recursive: true });
+    }
+    console.log(`📁 Логи будут в: ${LOGS_DIR}`);
+} catch (error) {
+    console.warn(`⚠️ Не могу создать ${LOGS_DIR}, используем консоль без файлов`);
+    LOGS_DIR = null;
 }
 
-const LOG_FILE = path.join(LOGS_DIR, `bot-${new Date().toISOString().split('T')[0]}.log`);
+const LOG_FILE = LOGS_DIR ? path.join(LOGS_DIR, `bot-${new Date().toISOString().split('T')[0]}.log`) : null;
 
 function log(type, message, data = null) {
     const now = new Date();
@@ -38,15 +46,24 @@ function log(type, message, data = null) {
     const logMessage = `[${time}] [${type}] ${message}`;
     console.log(logMessage);
     
-    let fileMessage = `[${time}] [${type}] ${message}`;
     if (data) {
-        fileMessage += '\n' + JSON.stringify(data, null, 2);
+        console.log(JSON.stringify(data, null, 2));
     }
-    fileMessage += '\n' + '-'.repeat(80) + '\n';
+    console.log('-'.repeat(80));
     
-    try {
-        fs.appendFileSync(LOG_FILE, fileMessage);
-    } catch (e) {}
+    // Пытаемся записать в файл только если LOG_FILE существует
+    if (LOG_FILE) {
+        try {
+            let fileMessage = `[${time}] [${type}] ${message}`;
+            if (data) {
+                fileMessage += '\n' + JSON.stringify(data, null, 2);
+            }
+            fileMessage += '\n' + '-'.repeat(80) + '\n';
+            fs.appendFileSync(LOG_FILE, fileMessage);
+        } catch (e) {
+            // Игнорируем ошибки записи
+        }
+    }
 }
 
 // ==========================================
