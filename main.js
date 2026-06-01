@@ -438,34 +438,6 @@ async function startBot() {
                 
                 await message.reply({ message: stats });
             }
-
-            if (text === '/test') {
-    // Получаем последние сообщения из чатов
-    const dialogs = await client.getDialogs({});
-    let recentMessages = 0;
-    
-    for (const dialog of dialogs.slice(0, 5)) {
-        try {
-            const messages = await client.getMessages(dialog.id, { limit: 1 });
-            if (messages.length > 0) {
-                recentMessages++;
-                console.log(`Чат: ${dialog.name}, Последнее сообщение: ${messages[0].message?.substring(0, 30)}`);
-            }
-        } catch(e) {}
-    }
-    
-    await message.reply({ 
-        message: `🔍 Диагностика:
-        
-✅ Бот подключен
-📊 Доступно чатов: ${dialogs.length}
-📨 Чатов с сообщениями: ${recentMessages}
-📈 totalProcessed: ${totalProcessed}
-
-Если чатов 0 - бот нигде не состоит.
-Если чаты есть, но счетчик 0 - бот не видит новые сообщения.`
-    });
-}
             
             if (text === '/last') {
                 if (leadsHistory.length === 0) {
