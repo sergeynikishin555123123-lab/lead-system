@@ -6,7 +6,6 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
-const { SocksProxyAgent } = require('socks-proxy-agent');
 const {
     PRIMARY_KEYWORDS,
     SECONDARY_KEYWORDS,
@@ -23,12 +22,6 @@ const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
 const SESSION_STRING = process.env.SESSION_STRING || '';
 const PORT = parseInt(process.env.PORT) || 8080;
-
-// Прокси настройки (добавьте в .env)
-const PROXY_HOST = process.env.PROXY_HOST || null;
-const PROXY_PORT = parseInt(process.env.PROXY_PORT) || null;
-const PROXY_USER = process.env.PROXY_USER || null;
-const PROXY_PASS = process.env.PROXY_PASS || null;
 
 // ==========================================
 // ФУНКЦИЯ ОСВОБОЖДЕНИЯ ПОРТА
@@ -47,11 +40,13 @@ function killProcessOnPort(port) {
 }
 
 // ==========================================
-// ПАПКА ДЛЯ ЛОГОВ
+// ПАПКА ДЛЯ ЛОГОВ - ТОЛЬКО /tmp (без прав на запись в /app)
 // ==========================================
+// НЕ ИСПОЛЬЗУЕМ __dirname и /app/logs - только /tmp
 const LOGS_DIR = '/tmp/lead-logs';
 const LOG_FILE = path.join(LOGS_DIR, `bot-${new Date().toISOString().split('T')[0]}.log`);
 
+// Создаем папку в /tmp (она точно доступна)
 try {
     if (!fs.existsSync(LOGS_DIR)) {
         fs.mkdirSync(LOGS_DIR, { recursive: true });
@@ -73,6 +68,7 @@ function log(type, message, data = null) {
     }
     console.log('-'.repeat(80));
     
+    // Пытаемся записать в файл
     try {
         if (fs.existsSync(LOGS_DIR)) {
             let fileMessage = `[${time}] [${type}] ${message}`;
@@ -82,7 +78,9 @@ function log(type, message, data = null) {
             fileMessage += '\n' + '-'.repeat(80) + '\n';
             fs.appendFileSync(LOG_FILE, fileMessage);
         }
-    } catch (e) {}
+    } catch (e) {
+        // Игнорируем ошибки записи
+    }
 }
 
 // ==========================================
@@ -120,8 +118,7 @@ async function startServer() {
                 totalSkipped: totalSkipped,
                 memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
                 port: PORT,
-                pid: process.pid,
-                proxy: PROXY_HOST ? `✅ ${PROXY_HOST}:${PROXY_PORT}` : '❌ нет'
+                pid: process.pid
             };
             
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -269,35 +266,10 @@ async function startBot() {
     
     const stringSession = new StringSession(SESSION_STRING);
     
-    // Настройки подключения с поддержкой прокси
-    const clientConfig = {
+    const client = new TelegramClient(stringSession, API_ID, API_HASH, {
         connectionRetries: 5,
         retryDelay: 3000,
-        baseLogger: console,
-        useWSS: true,  // Используем WebSocket Secure
-        deviceModel: 'Desktop',
-        systemVersion: 'Windows 11'
-    };
-    
-    // Добавляем прокси если он задан
-    let proxyAgent = null;
-    if (PROXY_HOST && PROXY_PORT) {
-        let proxyUrl;
-        if (PROXY_USER && PROXY_PASS) {
-            proxyUrl = `socks5://${PROXY_USER}:${PROXY_PASS}@${PROXY_HOST}:${PROXY_PORT}`;
-        } else {
-            proxyUrl = `socks5://${PROXY_HOST}:${PROXY_PORT}`;
-        }
-        proxyAgent = new SocksProxyAgent(proxyUrl);
-        clientConfig.proxy = proxyAgent;
-        console.log(`✅ Используется прокси: ${PROXY_HOST}:${PROXY_PORT}`);
-        log('PROXY', `Прокси настроен: ${PROXY_HOST}:${PROXY_PORT}`);
-    } else {
-        console.log('⚠️ Прокси не настроен, пробую прямое подключение...');
-        log('PROXY', 'Прямое подключение (без прокси)');
-    }
-    
-    const client = new TelegramClient(stringSession, API_ID, API_HASH, clientConfig);
+    });
     
     try {
         console.log('🔌 Подключение к Telegram...');
@@ -453,8 +425,7 @@ async function startBot() {
                 stats += `📝 Всего лидов: ${total}\n`;
                 stats += `📅 Сегодня: ${today}\n`;
                 stats += `👀 Проверено: ${totalProcessed}\n`;
-                stats += `⏭️ Пропущено: ${totalSkipped}\n`;
-                stats += `🔄 Прокси: ${PROXY_HOST ? '✅' : '❌'}\n\n`;
+                stats += `⏭️ Пропущено: ${totalSkipped}\n\n`;
                 stats += `📈 ТОП ЧАТОВ:\n`;
                 
                 const sorted = Object.entries(chatStats).sort((a, b) => b[1] - a[1]).slice(0, 5);
