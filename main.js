@@ -68,6 +68,8 @@ let totalProcessed = 0;
 let totalSkipped = 0;
 let totalLeads = 0;
 const botStartTime = new Date();
+let currentClient = null;
+let reconnectTimer = null;
 
 // ==========================================
 // ВЕБ-СЕРВЕР
@@ -85,7 +87,8 @@ const server = http.createServer((req, res) => {
         totalProcessed: totalProcessed,
         totalSkipped: totalSkipped,
         memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
-        port: PORT
+        port: PORT,
+        connected: currentClient ? currentClient.connected : false
     };
     
     if (req.url === '/health') {
@@ -102,29 +105,48 @@ server.listen(PORT, '0.0.0.0', () => {
 });
 
 // ==========================================
-// KEEP-ALIVE ДЛЯ RENDER FREE TIER
+// KEEP-ALIVE И ПРИНУДИТЕЛЬНОЕ ПЕРЕПОДКЛЮЧЕНИЕ
 // ==========================================
 function startKeepAlive() {
-    console.log(`🔄 Keep-Alive активирован для Render Free`);
+    console.log(`🔄 Keep-Alive активирован`);
     
+    // Пинг самого себя каждые 5 минут
     const ping = async () => {
         try {
-            const response = await fetch(`${RENDER_URL}/health`, {
+            await fetch(`${RENDER_URL}/health`, {
                 method: 'GET',
                 headers: { 'User-Agent': 'Keep-Alive-Bot' }
             });
-            console.log(`💓 Пинг OK (${response.status}) - ${new Date().toISOString()}`);
-        } catch (error) {
-            console.log(`⚠️ Пинг ошибка: ${error.message}`);
-        }
+            console.log(`💓 Пинг OK - ${new Date().toISOString()}`);
+        } catch (error) {}
     };
     
-    setTimeout(ping, 30000);
-    setInterval(ping, 10 * 60 * 1000);
+    setInterval(ping, 5 * 60 * 1000);
     
+    // Статус бота каждые 5 минут
     setInterval(() => {
-        console.log(`💚 Бот активен. Лидов: ${totalLeads}, Проверено: ${totalProcessed}`);
+        const status = currentClient ? (currentClient.connected ? '✅' : '❌') : '❌';
+        console.log(`💚 Бот ${status} | Лидов: ${totalLeads} | Проверено: ${totalProcessed}`);
     }, 5 * 60 * 1000);
+}
+
+// ==========================================
+// ПРИНУДИТЕЛЬНОЕ ПЕРЕПОДКЛЮЧЕНИЕ КАЖДЫЕ 25 МИНУТ
+// ==========================================
+function scheduleReconnect(client) {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    
+    reconnectTimer = setTimeout(async () => {
+        console.log('🔄 Принудительное переподключение (25 минут)');
+        try {
+            if (client && client.connected) {
+                await client.disconnect();
+            }
+        } catch(e) {}
+        
+        // Перезапускаем бота
+        process.exit(0);
+    }, 25 * 60 * 1000);
 }
 
 // ==========================================
@@ -257,6 +279,8 @@ async function startBot() {
         baseLogger: console
     });
     
+    currentClient = client;
+    
     try {
         console.log('🔌 Подключение к Telegram...');
         await client.connect();
@@ -267,6 +291,15 @@ async function startBot() {
         console.log(`👤 Авторизован: ${me.firstName || ''} @${me.username || 'нет'}`);
         
         console.log('✅ БОТ ЗАПУЩЕН И МОНИТОРИТ ЧАТЫ');
+        
+        // Запускаем таймер принудительного переподключения
+        scheduleReconnect(client);
+        
+        // Обработчик разрыва соединения
+        client.addEventHandler(async (error) => {
+            console.error('❌ Ошибка соединения, перезапуск...');
+            setTimeout(() => process.exit(0), 1000);
+        });
         
         // ==========================================
         // ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ
@@ -388,7 +421,8 @@ async function startBot() {
                 stats += `🔴 Срочных: ${high}\n`;
                 stats += `📝 Всего лидов: ${total}\n`;
                 stats += `📅 Сегодня: ${today}\n`;
-                stats += `👀 Проверено: ${totalProcessed}\n\n`;
+                stats += `👀 Проверено: ${totalProcessed}\n`;
+                stats += `🔄 Статус: ${client.connected ? '✅ онлайн' : '❌ офлайн'}\n\n`;
                 stats += `📈 ТОП ЧАТОВ:\n`;
                 
                 const sorted = Object.entries(chatStats).sort((a, b) => b[1] - a[1]).slice(0, 5);
@@ -419,7 +453,7 @@ async function startBot() {
             }
             
             if (text === '/ping') {
-                await message.reply({ message: '🏓 Понг! Бот работает!' });
+                await message.reply({ message: `🏓 Понг! Соединение: ${client.connected ? '✅' : '❌'}` });
             }
             
             if (text === '/reset') {
@@ -434,8 +468,8 @@ async function startBot() {
         }, new NewMessage({ fromUsers: ['me'] }));
         
         console.log('✅ ГОТОВ К РАБОТЕ');
+        console.log('⏰ Принудительное переподключение через 25 минут');
         
-        // Запускаем Keep-Alive
         startKeepAlive();
         
     } catch (err) {
