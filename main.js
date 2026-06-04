@@ -22,12 +22,14 @@ const API_HASH = process.env.API_HASH;
 const SESSION_STRING = process.env.SESSION_STRING || '';
 const PORT = parseInt(process.env.PORT) || 8080;
 const RENDER_URL = process.env.RENDER_URL || `http://localhost:${PORT}`;
+const HISTORY_HOURS = parseInt(process.env.HISTORY_HOURS) || 12; // Часов истории при запуске
 
 // ==========================================
 // ПАПКА ДЛЯ ЛОГОВ
 // ==========================================
 const LOGS_DIR = '/tmp/lead-logs';
 const LOG_FILE = path.join(LOGS_DIR, `bot-${new Date().toISOString().split('T')[0]}.log`);
+const STATS_FILE = '/tmp/lead-stats.json';
 
 try {
     if (!fs.existsSync(LOGS_DIR)) {
@@ -70,6 +72,33 @@ let totalLeads = 0;
 const botStartTime = new Date();
 
 // ==========================================
+// ЗАГРУЗКА/СОХРАНЕНИЕ СТАТИСТИКИ
+// ==========================================
+function loadStats() {
+    try {
+        if (fs.existsSync(STATS_FILE)) {
+            const data = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+            totalLeads = data.totalLeads || 0;
+            totalProcessed = data.totalProcessed || 0;
+            totalSkipped = data.totalSkipped || 0;
+            console.log(`📂 Загружена статистика: ${totalLeads} лидов, ${totalProcessed} проверено`);
+        }
+    } catch (e) {}
+}
+
+function saveStats() {
+    try {
+        const data = {
+            totalLeads,
+            totalProcessed,
+            totalSkipped,
+            lastSave: new Date().toISOString()
+        };
+        fs.writeFileSync(STATS_FILE, JSON.stringify(data));
+    } catch (e) {}
+}
+
+// ==========================================
 // ВЕБ-СЕРВЕР
 // ==========================================
 const server = http.createServer((req, res) => {
@@ -88,7 +117,6 @@ const server = http.createServer((req, res) => {
         port: PORT
     };
     
-    // Эндпоинт для health check Render
     if (req.url === '/health') {
         healthData = { status: 'alive', timestamp: Date.now() };
     }
@@ -109,7 +137,6 @@ function startKeepAlive() {
     console.log(`🔄 Keep-Alive активирован для Render Free`);
     console.log(`📍 Пингую: ${RENDER_URL}/health`);
     
-    // Функция пинга самого себя
     const ping = async () => {
         try {
             const controller = new AbortController();
@@ -128,13 +155,9 @@ function startKeepAlive() {
         }
     };
     
-    // Первый пинг через 30 секунд после запуска
     setTimeout(ping, 30000);
-    
-    // Дальше каждые 10 минут (Render отключает через 15 минут без активности)
     setInterval(ping, 10 * 60 * 1000);
     
-    // Дополнительно: каждые 5 минут пишем в лог для видимости активности
     setInterval(() => {
         console.log(`💚 Бот активен. Лидов: ${totalLeads}, Проверено: ${totalProcessed}, RAM: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
     }, 5 * 60 * 1000);
@@ -246,6 +269,131 @@ ${text.substring(0, 500)}${text.length > 500 ? '...' : ''}
 }
 
 // ==========================================
+// ЗАГРУЗКА ПРОПУЩЕННЫХ СООБЩЕНИЙ
+// ==========================================
+async function loadMissedMessages(client, hoursBack = HISTORY_HOURS) {
+    console.log(`\n📖 ЗАГРУЗКА ПРОПУЩЕННЫХ СООБЩЕНИЙ`);
+    console.log(`   За последние ${hoursBack} часов...`);
+    
+    const dialogs = await client.getDialogs({});
+    const cutoffDate = new Date(Date.now() - hoursBack * 60 * 60 * 1000);
+    let totalMessagesChecked = 0;
+    let totalLeadsFound = 0;
+    
+    console.log(`📋 Доступно чатов: ${dialogs.length}\n`);
+    
+    for (const dialog of dialogs) {
+        if (dialog.isBot) continue;
+        if (dialog.name === 'Saved Messages') continue;
+        
+        try {
+            console.log(`  🔍 ${dialog.name || 'Личный чат'}...`);
+            
+            const messages = await client.getMessages(dialog.id, { limit: 100 });
+            let chatMessagesChecked = 0;
+            let chatLeadsFound = 0;
+            
+            for (const msg of messages) {
+                if (msg.out) continue;
+                
+                const msgDate = msg.date ? new Date(msg.date * 1000) : new Date();
+                if (msgDate < cutoffDate) continue;
+                
+                const text = msg.message || '';
+                if (!text || text.length < 15) continue;
+                if (text.startsWith('/')) continue;
+                
+                totalMessagesChecked++;
+                chatMessagesChecked++;
+                
+                const textLower = text.toLowerCase();
+                const foundPrimary = PRIMARY_KEYWORDS.filter(word => textLower.includes(word));
+                const foundSecondary = SECONDARY_KEYWORDS.filter(word => textLower.includes(word));
+                
+                if (foundPrimary.length === 0 && foundSecondary.length === 0) continue;
+                
+                const { isClient, reason } = isRealClient(text);
+                if (!isClient) continue;
+                
+                totalLeadsFound++;
+                chatLeadsFound++;
+                totalLeads++;
+                
+                let chatName = dialog.name || 'Личный чат';
+                let chatLink = '';
+                let senderName = 'Неизвестный';
+                let senderUsername = 'нет';
+                let msgLink = '';
+                
+                try {
+                    if (dialog.username) {
+                        chatLink = `https://t.me/${dialog.username}`;
+                        msgLink = `https://t.me/${dialog.username}/${msg.id}`;
+                    } else {
+                        msgLink = `https://t.me/c/${dialog.id.toString().replace('-100', '')}/${msg.id}`;
+                    }
+                } catch (e) {}
+                
+                try {
+                    const sender = await msg.getSender();
+                    senderName = `${sender.firstName || ''} ${sender.lastName || ''}`.trim() || 'Неизвестный';
+                    senderUsername = sender.username ? `@${sender.username}` : 'нет';
+                } catch (e) {}
+                
+                const contacts = extractContacts(text);
+                const city = detectCity(text);
+                const urgency = detectUrgency(text);
+                
+                const leadMessage = formatLead(
+                    chatName, chatLink, senderName, senderUsername,
+                    text, contacts, city, urgency, reason, msgLink
+                );
+                
+                try {
+                    await client.sendMessage('me', { message: leadMessage });
+                    console.log(`     🎯 ВОССТАНОВЛЕН ЛИД: ${urgency}`);
+                    
+                    leadsHistory.push({
+                        date: msgDate,
+                        chat: chatName,
+                        sender: senderName,
+                        text: text.substring(0, 100),
+                        urgency: urgency,
+                        city: city,
+                        contacts: contacts
+                    });
+                    
+                    if (chatStats[chatName]) {
+                        chatStats[chatName]++;
+                    } else {
+                        chatStats[chatName] = 1;
+                    }
+                    
+                    await new Promise(r => setTimeout(r, 300));
+                    
+                } catch (e) {
+                    console.error(`     ❌ Ошибка отправки: ${e.message}`);
+                }
+            }
+            
+            if (chatMessagesChecked > 0 || chatLeadsFound > 0) {
+                console.log(`     📊 Проверено: ${chatMessagesChecked}, Лидов: ${chatLeadsFound}`);
+            }
+            
+        } catch (err) {
+            console.log(`  ⚠️ Ошибка чата ${dialog.name}: ${err.message}`);
+        }
+    }
+    
+    console.log(`\n✅ ЗАГРУЗКА ЗАВЕРШЕНА!`);
+    console.log(`   • Проверено сообщений: ${totalMessagesChecked}`);
+    console.log(`   • Найдено лидов: ${totalLeadsFound}`);
+    console.log(`   • Всего лидов теперь: ${totalLeads}\n`);
+    
+    return { totalMessagesChecked, totalLeadsFound };
+}
+
+// ==========================================
 // ЗАПУСК БОТА
 // ==========================================
 async function startBot() {
@@ -260,7 +408,6 @@ async function startBot() {
     
     const stringSession = new StringSession(SESSION_STRING);
     
-    // Оптимальные настройки для Render
     const client = new TelegramClient(stringSession, API_ID, API_HASH, {
         connectionRetries: 10,
         retryDelay: 3000,
@@ -291,6 +438,11 @@ async function startBot() {
         console.log(`👤 Авторизован: ${userName}`);
         log('SUCCESS', `Авторизован: ${userName}`);
         
+        // ==========================================
+        // ЗАГРУЗКА ПРОПУЩЕННЫХ СООБЩЕНИЙ
+        // ==========================================
+        await loadMissedMessages(client, HISTORY_HOURS);
+        
         console.log('✅ БОТ ЗАПУЩЕН И МОНИТОРИТ ЧАТЫ');
         log('START', 'БОТ ЗАПУЩЕН');
         
@@ -301,12 +453,10 @@ async function startBot() {
             try {
                 const message = event.message;
                 
-                // Пропускаем свои сообщения
                 if (message.out) return;
                 
                 const text = message.message || '';
                 
-                // Пропускаем команды и короткие сообщения
                 if (text.startsWith('/')) return;
                 if (!text || text.length < 15) return;
                 
@@ -327,7 +477,10 @@ async function startBot() {
                 const foundPrimary = PRIMARY_KEYWORDS.filter(word => textLower.includes(word));
                 const foundSecondary = SECONDARY_KEYWORDS.filter(word => textLower.includes(word));
                 
-                if (foundPrimary.length === 0 && foundSecondary.length === 0) return;
+                if (foundPrimary.length === 0 && foundSecondary.length === 0) {
+                    totalSkipped++;
+                    return;
+                }
                 
                 let chatName = 'Неизвестный чат';
                 try {
@@ -406,19 +559,20 @@ async function startBot() {
                 
                 chatStats[chatName] = (chatStats[chatName] || 0) + 1;
                 
+                saveStats();
+                
             } catch (error) {
                 console.error('Ошибка обработки:', error.message);
             }
         }, new NewMessage({}));
         
         // ==========================================
-        // ОБРАБОТЧИК КОМАНД (только свои сообщения)
+        // ОБРАБОТЧИК КОМАНД
         // ==========================================
         client.addEventHandler(async (event) => {
             const message = event.message;
             const text = message.message || '';
             
-            // Статистика
             if (text === '/stats') {
                 const total = leadsHistory.length;
                 const today = leadsHistory.filter(l => {
@@ -455,7 +609,6 @@ async function startBot() {
                 await message.reply({ message: stats });
             }
             
-            // Последние 5 лидов
             if (text === '/last') {
                 if (leadsHistory.length === 0) {
                     await message.reply({ message: '📭 Лидов пока нет' });
@@ -473,7 +626,6 @@ async function startBot() {
                 await message.reply({ message: result });
             }
             
-            // Пинг (проверка что бот жив)
             if (text === '/ping') {
                 const uptime = Math.floor((new Date() - botStartTime) / 1000);
                 await message.reply({ 
@@ -481,14 +633,20 @@ async function startBot() {
                 });
             }
             
-            // Сброс статистики
             if (text === '/reset') {
                 totalProcessed = 0;
                 totalSkipped = 0;
                 totalLeads = 0;
                 leadsHistory.length = 0;
                 Object.keys(chatStats).forEach(key => delete chatStats[key]);
+                saveStats();
                 await message.reply({ message: '✅ Статистика сброшена!' });
+            }
+            
+            if (text === '/history') {
+                await message.reply({ message: `📖 Загружаю историю за последние ${HISTORY_HOURS} часов...` });
+                await loadMissedMessages(client, HISTORY_HOURS);
+                await message.reply({ message: `✅ История загружена! Всего лидов: ${totalLeads}` });
             }
             
         }, new NewMessage({ fromUsers: ['me'] }));
@@ -496,8 +654,14 @@ async function startBot() {
         console.log('✅ БОТ ГОТОВ К РАБОТЕ');
         log('SUCCESS', 'Бот готов к работе');
         
-        // Запускаем Keep-Alive после успешного подключения бота
+        // Загружаем сохраненную статистику
+        loadStats();
+        
+        // Запускаем Keep-Alive
         startKeepAlive();
+        
+        // Сохраняем статистику каждые 30 секунд
+        setInterval(saveStats, 30000);
         
     } catch (err) {
         console.error(`❌ Ошибка: ${err.message}`);
@@ -517,9 +681,9 @@ async function startBot() {
     console.log('🚀 ЗАПУСК ПРИЛОЖЕНИЯ');
     console.log(`📦 Node.js ${process.version}`);
     console.log(`🕐 Время запуска: ${new Date().toLocaleString('ru-RU')}`);
+    console.log(`📖 Загрузка истории за ${HISTORY_HOURS} часов`);
     console.log(`🌐 Render Keep-Alive: включен (каждые 10 минут)`);
     
-    // Запускаем бота
     startBot().catch(err => {
         console.error('Критическая ошибка:', err.message);
     });
@@ -529,11 +693,13 @@ async function startBot() {
 // ОБРАБОТКА ЗАВЕРШЕНИЯ
 // ==========================================
 process.on('SIGTERM', () => {
-    console.log('📡 SIGTERM - завершаю работу');
+    console.log('📡 SIGTERM - сохраняю статистику...');
+    saveStats();
     server.close(() => process.exit(0));
 });
 
 process.on('SIGINT', () => {
-    console.log('📡 SIGINT - завершаю работу');
+    console.log('📡 SIGINT - сохраняю статистику...');
+    saveStats();
     server.close(() => process.exit(0));
 });
