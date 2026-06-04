@@ -5,7 +5,6 @@ const { NewMessage } = require('telegram/events');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { exec } = require('child_process');
 const {
     PRIMARY_KEYWORDS,
     SECONDARY_KEYWORDS,
@@ -22,6 +21,7 @@ const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
 const SESSION_STRING = process.env.SESSION_STRING || '';
 const PORT = parseInt(process.env.PORT) || 8080;
+const RENDER_URL = process.env.RENDER_URL || `http://localhost:${PORT}`;
 
 // ==========================================
 // ПАПКА ДЛЯ ЛОГОВ
@@ -33,9 +33,9 @@ try {
     if (!fs.existsSync(LOGS_DIR)) {
         fs.mkdirSync(LOGS_DIR, { recursive: true });
     }
-    console.log('✅ Логи будут писаться в /tmp/lead-logs');
+    console.log('✅ Логи в /tmp/lead-logs');
 } catch (error) {
-    console.warn('⚠️ Не могу создать папку для логов, пишу только в консоль');
+    console.warn('⚠️ Логи только в консоль');
 }
 
 function log(type, message, data = null) {
@@ -45,17 +45,13 @@ function log(type, message, data = null) {
     const logMessage = `[${time}] [${type}] ${message}`;
     console.log(logMessage);
     
-    if (data) {
-        console.log(JSON.stringify(data, null, 2));
-    }
+    if (data) console.log(JSON.stringify(data, null, 2));
     console.log('-'.repeat(80));
     
     try {
-        if (fs.existsSync(LOGS_DIR)) {
+        if (LOGS_DIR && fs.existsSync(LOGS_DIR)) {
             let fileMessage = `[${time}] [${type}] ${message}`;
-            if (data) {
-                fileMessage += '\n' + JSON.stringify(data, null, 2);
-            }
+            if (data) fileMessage += '\n' + JSON.stringify(data, null, 2);
             fileMessage += '\n' + '-'.repeat(80) + '\n';
             fs.appendFileSync(LOG_FILE, fileMessage);
         }
@@ -76,70 +72,77 @@ const botStartTime = new Date();
 // ==========================================
 // ВЕБ-СЕРВЕР
 // ==========================================
-
-let server = null;
-
-function killProcessOnPort(port) {
-    return new Promise((resolve) => {
-        console.log(`🔍 Проверяю порт ${port}...`);
-        const command = `lsof -ti:${port} | xargs kill -9 2>/dev/null || true`;
-        exec(command, (error, stdout, stderr) => {
-            if (stdout && stdout.trim()) {
-                console.log(`✅ Убит процесс на порту ${port}`);
-            }
-            setTimeout(resolve, 1000);
-        });
-    });
-}
-
-async function startServer() {
-    await killProcessOnPort(PORT);
+const server = http.createServer((req, res) => {
+    const uptime = Math.floor((new Date() - botStartTime) / 1000);
+    const hours = Math.floor(uptime / 3600);
+    const minutes = Math.floor((uptime % 3600) / 60);
+    const seconds = uptime % 60;
     
-    return new Promise((resolve, reject) => {
-        server = http.createServer((req, res) => {
-            const uptime = Math.floor((new Date() - botStartTime) / 1000);
-            const hours = Math.floor(uptime / 3600);
-            const minutes = Math.floor((uptime % 3600) / 60);
-            const seconds = uptime % 60;
-            
-            const healthData = {
-                status: 'running',
-                uptime: `${hours}ч ${minutes}м ${seconds}с`,
-                totalLeads: totalLeads,
-                totalProcessed: totalProcessed,
-                totalSkipped: totalSkipped,
-                memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
-                port: PORT,
-                pid: process.pid
-            };
-            
-            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify(healthData, null, 2));
-        });
+    let healthData = {
+        status: 'running',
+        uptime: `${hours}ч ${minutes}м ${seconds}с`,
+        totalLeads: totalLeads,
+        totalProcessed: totalProcessed,
+        totalSkipped: totalSkipped,
+        memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
+        port: PORT
+    };
+    
+    // Эндпоинт для health check Render
+    if (req.url === '/health') {
+        healthData = { status: 'alive', timestamp: Date.now() };
+    }
+    
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(healthData, null, 2));
+});
 
-        server.on('error', (err) => {
-            if (err.code === 'EADDRINUSE') {
-                console.log(`⚠️ Порт ${PORT} занят, убиваем процесс...`);
-                killProcessOnPort(PORT).then(() => {
-                    server.listen(PORT, '0.0.0.0');
-                });
-            } else {
-                reject(err);
-            }
-        });
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`✅ Веб-сервер на порту ${PORT}`);
+    log('SUCCESS', `Веб-сервер на порту ${PORT}`);
+});
 
-        server.listen(PORT, '0.0.0.0', () => {
-            console.log(`✅ Веб-сервер запущен на порту ${PORT} (PID: ${process.pid})`);
-            log('SUCCESS', `Веб-сервер на порту ${PORT}`);
-            resolve(server);
-        });
-    });
+// ==========================================
+// KEEP-ALIVE ДЛЯ RENDER FREE TIER
+// ==========================================
+function startKeepAlive() {
+    console.log(`🔄 Keep-Alive активирован для Render Free`);
+    console.log(`📍 Пингую: ${RENDER_URL}/health`);
+    
+    // Функция пинга самого себя
+    const ping = async () => {
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            
+            const response = await fetch(`${RENDER_URL}/health`, {
+                method: 'GET',
+                headers: { 'User-Agent': 'Keep-Alive-Bot' },
+                signal: controller.signal
+            });
+            
+            clearTimeout(timeout);
+            console.log(`💓 Пинг OK (${response.status}) - ${new Date().toISOString()}`);
+        } catch (error) {
+            console.log(`⚠️ Пинг ошибка: ${error.message}`);
+        }
+    };
+    
+    // Первый пинг через 30 секунд после запуска
+    setTimeout(ping, 30000);
+    
+    // Дальше каждые 10 минут (Render отключает через 15 минут без активности)
+    setInterval(ping, 10 * 60 * 1000);
+    
+    // Дополнительно: каждые 5 минут пишем в лог для видимости активности
+    setInterval(() => {
+        console.log(`💚 Бот активен. Лидов: ${totalLeads}, Проверено: ${totalProcessed}, RAM: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
+    }, 5 * 60 * 1000);
 }
 
 // ==========================================
 // ФУНКЦИИ
 // ==========================================
-
 function extractContacts(text) {
     const contacts = [];
     
@@ -243,9 +246,8 @@ ${text.substring(0, 500)}${text.length > 500 ? '...' : ''}
 }
 
 // ==========================================
-// ЗАПУСК БОТА - МАКСИМАЛЬНЫЙ ОБХОД БЛОКИРОВОК
+// ЗАПУСК БОТА
 // ==========================================
-
 async function startBot() {
     console.log('🤖 Запуск юзербота...');
     log('START', 'Запуск юзербота');
@@ -258,111 +260,35 @@ async function startBot() {
     
     const stringSession = new StringSession(SESSION_STRING);
     
-    // ==========================================
-    // КРИТИЧЕСКИЕ НАСТРОЙКИ ДЛЯ ОБХОДА БЛОКИРОВОК
-    // ==========================================
-    const clientConfig = {
-        // Основные настройки
-        connectionRetries: 15,              // Больше попыток
-        retryDelay: 3000,                   // Задержка между попытками
-        requestRetries: 10,                 // Ретри на запросы
-        
-        // Обход блокировок
-        useWSS: true,                       // WebSocket Secure (важно!)
-        useIPv6: false,                     // Отключаем IPv6 (часто блокируют)
-        
-        // Таймауты
-        receiveRetryDelay: 5000,            // Задержка получения
-        floodSleepThreshold: 60,            // Порог флуда
-        
-        // Эмуляция реального клиента
-        deviceModel: 'iPhone 15 Pro',       // Маскировка под iPhone
-        systemVersion: 'iOS 18.0',          // iOS система
-        appVersion: '11.0.0',               // Версия приложения
-        langCode: 'ru',                     // Русский язык
-        
-        // Автоматическое восстановление
-        autoReconnect: true,                // Автопереподключение
-        maxConcurrentDownloads: 1,          // Ограничение загрузок
-        
-        // Логирование для отладки
-        baseLogger: console,
-        
-        // Альтернативные порты (пробует разные)
-        connectionRetriesConfig: {
-            maxAttempts: 10,
-            retryInterval: 5000,
-            statusCodeHandlers: {
-                429: () => 30000,            // Если флуд - ждем 30 сек
-                500: () => 10000,            // Ошибка сервера - ждем 10 сек
-                default: () => 5000
-            }
-        }
-    };
-    
-    console.log('📡 Настройки подключения:');
-    console.log(`   • WebSocket Secure: ${clientConfig.useWSS ? '✅ ДА' : '❌ НЕТ'}`);
-    console.log(`   • Устройство: ${clientConfig.deviceModel}`);
-    console.log(`   • Ретриев: ${clientConfig.connectionRetries}`);
-    console.log(`   • Авто-переподключение: ${clientConfig.autoReconnect ? '✅ ДА' : '❌ НЕТ'}`);
-    
-    const client = new TelegramClient(stringSession, API_ID, API_HASH, clientConfig);
-    
-    // ==========================================
-    // ОБРАБОТКА РАЗРЫВОВ СВЯЗИ
-    // ==========================================
-    let reconnectAttempts = 0;
-    const maxReconnectAttempts = 20;
-    
-    client.addEventHandler((error) => {
-        console.error(`❌ Ошибка соединения: ${error.message}`);
-        log('ERROR', `Ошибка соединения: ${error.message}`);
+    // Оптимальные настройки для Render
+    const client = new TelegramClient(stringSession, API_ID, API_HASH, {
+        connectionRetries: 10,
+        retryDelay: 3000,
+        requestRetries: 5,
+        receiveRetryDelay: 5000,
+        useWSS: true,
+        useIPv6: false,
+        deviceModel: 'Desktop',
+        systemVersion: 'Windows 11',
+        appVersion: '10.5.0',
+        langCode: 'ru',
+        autoReconnect: true,
+        maxConcurrentDownloads: 1,
+        baseLogger: console
     });
-    
-    // Функция переподключения
-    async function reconnect() {
-        reconnectAttempts++;
-        console.log(`🔄 Попытка переподключения ${reconnectAttempts}/${maxReconnectAttempts}...`);
-        
-        if (reconnectAttempts >= maxReconnectAttempts) {
-            console.error('❌ Достигнут лимит переподключений, перезапуск процесса...');
-            process.exit(1);
-        }
-        
-        const delay = Math.min(30000, reconnectAttempts * 2000);
-        console.log(`⏳ Следующая попытка через ${delay/1000} секунд...`);
-        
-        setTimeout(() => {
-            if (!client.connected) {
-                startBot().catch(console.error);
-            }
-        }, delay);
-    }
     
     try {
         console.log('🔌 Подключение к Telegram...');
         log('CONNECT', 'Подключение к Telegram...');
         
-        // Устанавливаем таймаут подключения
-        const connectTimeout = setTimeout(() => {
-            console.error('❌ Таймаут подключения (>30 секунд)');
-            reconnect();
-        }, 30000);
-        
         await client.connect();
-        clearTimeout(connectTimeout);
         
         console.log('✅ Подключено!');
         log('SUCCESS', 'Подключено к Telegram');
         
-        // Сбрасываем счетчик попыток при успешном подключении
-        reconnectAttempts = 0;
-        
         const me = await client.getMe();
         const userName = `${me.firstName || ''} ${me.lastName || ''} (@${me.username || 'нет'})`;
         console.log(`👤 Авторизован: ${userName}`);
-        console.log(`🆔 ID: ${me.id}`);
-        console.log(`📱 Устройство: ${me.isBot ? 'Бот' : 'Пользователь'}`);
         log('SUCCESS', `Авторизован: ${userName}`);
         
         console.log('✅ БОТ ЗАПУЩЕН И МОНИТОРИТ ЧАТЫ');
@@ -375,10 +301,12 @@ async function startBot() {
             try {
                 const message = event.message;
                 
+                // Пропускаем свои сообщения
                 if (message.out) return;
                 
                 const text = message.message || '';
                 
+                // Пропускаем команды и короткие сообщения
                 if (text.startsWith('/')) return;
                 if (!text || text.length < 15) return;
                 
@@ -484,12 +412,13 @@ async function startBot() {
         }, new NewMessage({}));
         
         // ==========================================
-        // ОБРАБОТЧИК КОМАНД
+        // ОБРАБОТЧИК КОМАНД (только свои сообщения)
         // ==========================================
         client.addEventHandler(async (event) => {
             const message = event.message;
             const text = message.message || '';
             
+            // Статистика
             if (text === '/stats') {
                 const total = leadsHistory.length;
                 const today = leadsHistory.filter(l => {
@@ -508,9 +437,9 @@ async function startBot() {
                 stats += `🔴 Срочных: ${high}\n`;
                 stats += `📝 Всего лидов: ${total}\n`;
                 stats += `📅 Сегодня: ${today}\n`;
-                stats += `👀 Проверено: ${totalProcessed}\n`;
+                stats += `👀 Проверено сообщений: ${totalProcessed}\n`;
                 stats += `⏭️ Пропущено: ${totalSkipped}\n`;
-                stats += `🔄 Подключение: ${client.connected ? '✅' : '❌'}\n\n`;
+                stats += `💾 Память: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n\n`;
                 stats += `📈 ТОП ЧАТОВ:\n`;
                 
                 const sorted = Object.entries(chatStats).sort((a, b) => b[1] - a[1]).slice(0, 5);
@@ -519,37 +448,40 @@ async function startBot() {
                     stats += `(пока пусто)\n`;
                 } else {
                     sorted.forEach(([chat, count]) => {
-                        stats += `• ${chat}: ${count}\n`;
+                        stats += `• ${chat}: ${count} лидов\n`;
                     });
                 }
                 
                 await message.reply({ message: stats });
             }
             
+            // Последние 5 лидов
             if (text === '/last') {
                 if (leadsHistory.length === 0) {
-                    await message.reply({ message: '📭 Пусто' });
+                    await message.reply({ message: '📭 Лидов пока нет' });
                     return;
                 }
                 
                 const recent = leadsHistory.slice(-5).reverse();
-                let result = `📋 ПОСЛЕДНИЕ 5:\n\n`;
+                let result = `📋 ПОСЛЕДНИЕ 5 ЛИДОВ:\n\n`;
                 
                 recent.forEach((l, i) => {
                     const time = new Date(l.date).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-                    result += `${i + 1}. ${time} | ${l.urgency} | ${l.chat}\n   ${l.sender}: ${l.text}\n\n`;
+                    result += `${i + 1}. ${time} | ${l.urgency} | ${l.chat}\n   ${l.sender}: ${l.text.substring(0, 50)}${l.text.length > 50 ? '...' : ''}\n\n`;
                 });
                 
                 await message.reply({ message: result });
             }
             
+            // Пинг (проверка что бот жив)
             if (text === '/ping') {
                 const uptime = Math.floor((new Date() - botStartTime) / 1000);
                 await message.reply({ 
-                    message: `🏓 Понг!\n⏱ Аптайм: ${Math.floor(uptime/3600)}ч ${Math.floor((uptime%3600)/60)}м\n🔄 Соединение: ${client.connected ? '✅ активно' : '❌ разорвано'}`
+                    message: `🏓 Понг!\n⏱ Аптайм: ${Math.floor(uptime/3600)}ч ${Math.floor((uptime%3600)/60)}м ${uptime%60}с\n🔄 Соединение: ${client.connected ? '✅ активно' : '❌ разорвано'}`
                 });
             }
             
+            // Сброс статистики
             if (text === '/reset') {
                 totalProcessed = 0;
                 totalSkipped = 0;
@@ -559,41 +491,13 @@ async function startBot() {
                 await message.reply({ message: '✅ Статистика сброшена!' });
             }
             
-            if (text === '/reconnect') {
-                await message.reply({ message: '🔄 Принудительное переподключение...' });
-                await client.disconnect();
-                setTimeout(() => startBot(), 3000);
-            }
-            
         }, new NewMessage({ fromUsers: ['me'] }));
         
-        // ==========================================
-        // ХРАНИЛИЩЕ ДЛЯ ОТСЛЕЖИВАНИЯ ЖИЗНИ
-        // ==========================================
-        let lastPing = Date.now();
-        
-        // Пинг каждые 30 секунд чтобы держать соединение живым
-        const keepAlive = setInterval(() => {
-            if (client.connected) {
-                lastPing = Date.now();
-                // Не отправляем реальный пинг, чтобы не спамить
-            } else {
-                console.log('⚠️ Соединение потеряно, попытка восстановления...');
-                reconnect();
-            }
-        }, 30000);
-        
-        console.log('✅ ГОТОВ К РАБОТЕ');
-        console.log('📡 Keep-Alive включен (каждые 30 сек)');
+        console.log('✅ БОТ ГОТОВ К РАБОТЕ');
         log('SUCCESS', 'Бот готов к работе');
         
-        // Отслеживание разрыва соединения
-        client.addEventHandler((disconnect) => {
-            console.error('❌ Соединение разорвано!');
-            log('ERROR', 'Соединение разорвано');
-            clearInterval(keepAlive);
-            reconnect();
-        });
+        // Запускаем Keep-Alive после успешного подключения бота
+        startKeepAlive();
         
     } catch (err) {
         console.error(`❌ Ошибка: ${err.message}`);
@@ -609,19 +513,11 @@ async function startBot() {
 // ==========================================
 // ЗАПУСК
 // ==========================================
-
 (async () => {
     console.log('🚀 ЗАПУСК ПРИЛОЖЕНИЯ');
     console.log(`📦 Node.js ${process.version}`);
-    console.log(`🆔 PID: ${process.pid}`);
     console.log(`🕐 Время запуска: ${new Date().toLocaleString('ru-RU')}`);
-    
-    // Запускаем веб-сервер
-    try {
-        await startServer();
-    } catch (err) {
-        console.error('❌ Ошибка сервера:', err.message);
-    }
+    console.log(`🌐 Render Keep-Alive: включен (каждые 10 минут)`);
     
     // Запускаем бота
     startBot().catch(err => {
@@ -629,21 +525,15 @@ async function startBot() {
     });
 })();
 
-// Поддержание процесса
+// ==========================================
+// ОБРАБОТКА ЗАВЕРШЕНИЯ
+// ==========================================
 process.on('SIGTERM', () => {
-    console.log('📡 SIGTERM');
-    if (server) server.close(() => process.exit(0));
-    else process.exit(0);
+    console.log('📡 SIGTERM - завершаю работу');
+    server.close(() => process.exit(0));
 });
 
 process.on('SIGINT', () => {
-    console.log('📡 SIGINT');
-    if (server) server.close(() => process.exit(0));
-    else process.exit(0);
+    console.log('📡 SIGINT - завершаю работу');
+    server.close(() => process.exit(0));
 });
-
-// Каждые 5 минут статус
-setInterval(() => {
-    const memUsage = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-    console.log(`💚 Жив. Лидов: ${totalLeads}, Проверено: ${totalProcessed}, RAM: ${memUsage}MB`);
-}, 300000);
