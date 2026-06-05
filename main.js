@@ -21,7 +21,6 @@ const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
 const SESSION_STRING = process.env.SESSION_STRING || '';
 const PORT = parseInt(process.env.PORT) || 8080;
-const RENDER_URL = process.env.RENDER_URL || `http://localhost:${PORT}`;
 
 // ==========================================
 // ПАПКА ДЛЯ ЛОГОВ
@@ -70,7 +69,7 @@ let totalLeads = 0;
 const botStartTime = new Date();
 
 // ==========================================
-// ВЕБ-СЕРВЕР
+// ВЕБ-СЕРВЕР (для Render health check)
 // ==========================================
 const server = http.createServer((req, res) => {
     const uptime = Math.floor((new Date() - botStartTime) / 1000);
@@ -78,19 +77,14 @@ const server = http.createServer((req, res) => {
     const minutes = Math.floor((uptime % 3600) / 60);
     const seconds = uptime % 60;
     
-    let healthData = {
+    const healthData = {
         status: 'running',
         uptime: `${hours}ч ${minutes}м ${seconds}с`,
         totalLeads: totalLeads,
         totalProcessed: totalProcessed,
         totalSkipped: totalSkipped,
-        memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
-        port: PORT
+        memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`
     };
-    
-    if (req.url === '/health') {
-        healthData = { status: 'alive', timestamp: Date.now() };
-    }
     
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(healthData, null, 2));
@@ -98,33 +92,36 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Веб-сервер на порту ${PORT}`);
-    log('SUCCESS', `Веб-сервер на порту ${PORT}`);
 });
 
 // ==========================================
-// KEEP-ALIVE ДЛЯ RENDER FREE TIER
+// ФУНКЦИЯ ПОДДЕРЖАНИЯ АКТИВНОСТИ (сам себе пишет)
 // ==========================================
-function startKeepAlive() {
-    console.log(`🔄 Keep-Alive активирован для Render Free`);
+async function keepAlive(client) {
+    console.log('🔄 Запущена система поддержания активности (каждые 4 минуты)');
     
-    const ping = async () => {
+    // Функция отправки keep-alive сообщения
+    const sendKeepAlive = async () => {
         try {
-            const response = await fetch(`${RENDER_URL}/health`, {
-                method: 'GET',
-                headers: { 'User-Agent': 'Keep-Alive-Bot' }
-            });
-            console.log(`💓 Пинг OK (${response.status}) - ${new Date().toISOString()}`);
+            if (client && client.connected) {
+                const now = new Date();
+                const time = now.toLocaleTimeString('ru-RU');
+                // Отправляем себе невидимое сообщение (с точкой, чтобы не засорять)
+                await client.sendMessage('me', { message: `.` });
+                console.log(`💓 Keep-alive отправлен в ${time}`);
+            } else {
+                console.log(`⚠️ Keep-alive: клиент не подключен`);
+            }
         } catch (error) {
-            console.log(`⚠️ Пинг ошибка: ${error.message}`);
+            console.log(`❌ Keep-alive ошибка: ${error.message}`);
         }
     };
     
-    setTimeout(ping, 30000);
-    setInterval(ping, 10 * 60 * 1000);
+    // Первый раз через 2 минуты после запуска
+    setTimeout(sendKeepAlive, 2 * 60 * 1000);
     
-    setInterval(() => {
-        console.log(`💚 Бот активен. Лидов: ${totalLeads}, Проверено: ${totalProcessed}`);
-    }, 5 * 60 * 1000);
+    // Дальше каждые 4 минуты (Render отключает через 15 минут без активности)
+    setInterval(sendKeepAlive, 4 * 60 * 1000);
 }
 
 // ==========================================
@@ -268,6 +265,9 @@ async function startBot() {
         
         console.log('✅ БОТ ЗАПУЩЕН И МОНИТОРИТ ЧАТЫ');
         
+        // ЗАПУСКАЕМ KEEP-ALIVE (сам себе пишет каждые 4 минуты)
+        keepAlive(client);
+        
         // ==========================================
         // ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ
         // ==========================================
@@ -280,6 +280,9 @@ async function startBot() {
                 const text = message.message || '';
                 if (!text || text.length < 15) return;
                 if (text.startsWith('/')) return;
+                
+                // Пропускаем keep-alive сообщения (точка)
+                if (text === '.') return;
                 
                 totalProcessed++;
                 
@@ -434,9 +437,12 @@ async function startBot() {
         }, new NewMessage({ fromUsers: ['me'] }));
         
         console.log('✅ ГОТОВ К РАБОТЕ');
+        console.log('⏰ Keep-alive: каждые 4 минуты бот пишет себе точку');
         
-        // Запускаем Keep-Alive
-        startKeepAlive();
+        // Каждые 5 минут пишем в консоль статус
+        setInterval(() => {
+            console.log(`💚 Жив. Лидов: ${totalLeads}, Проверено: ${totalProcessed}`);
+        }, 300000);
         
     } catch (err) {
         console.error(`❌ Ошибка: ${err.message}`);
