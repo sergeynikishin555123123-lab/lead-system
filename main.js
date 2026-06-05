@@ -67,6 +67,9 @@ let totalProcessed = 0;
 let totalSkipped = 0;
 let totalLeads = 0;
 const botStartTime = new Date();
+let currentClient = null;
+let keepAliveInterval = null;
+let reconnectAttempts = 0;
 
 // ==========================================
 // ВЕБ-СЕРВЕР (для Render health check)
@@ -83,7 +86,8 @@ const server = http.createServer((req, res) => {
         totalLeads: totalLeads,
         totalProcessed: totalProcessed,
         totalSkipped: totalSkipped,
-        memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`
+        memory: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
+        connected: currentClient ? currentClient.connected : false
     };
     
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -95,33 +99,52 @@ server.listen(PORT, '0.0.0.0', () => {
 });
 
 // ==========================================
-// ФУНКЦИЯ ПОДДЕРЖАНИЯ АКТИВНОСТИ (сам себе пишет)
+// ФУНКЦИЯ ПРОВЕРКИ И ВОССТАНОВЛЕНИЯ СОЕДИНЕНИЯ
 // ==========================================
-async function keepAlive(client) {
-    console.log('🔄 Запущена система поддержания активности (каждые 4 минуты)');
+async function checkAndReconnect(client) {
+    if (!client || !client.connected) {
+        console.log('⚠️ Соединение потеряно, перезапускаю бота...');
+        if (keepAliveInterval) clearInterval(keepAliveInterval);
+        setTimeout(() => {
+            process.exit(0);
+        }, 1000);
+        return false;
+    }
+    return true;
+}
+
+// ==========================================
+// ФУНКЦИЯ ПОДДЕРЖАНИЯ АКТИВНОСТИ
+// ==========================================
+async function startKeepAlive(client) {
+    console.log('🔄 Запуск Keep-Alive (каждые 3 минуты)');
     
-    // Функция отправки keep-alive сообщения
-    const sendKeepAlive = async () => {
+    const sendPing = async () => {
         try {
-            if (client && client.connected) {
-                const now = new Date();
-                const time = now.toLocaleTimeString('ru-RU');
-                // Отправляем себе невидимое сообщение (с точкой, чтобы не засорять)
-                await client.sendMessage('me', { message: `.` });
-                console.log(`💓 Keep-alive отправлен в ${time}`);
-            } else {
-                console.log(`⚠️ Keep-alive: клиент не подключен`);
-            }
+            const isConnected = await checkAndReconnect(client);
+            if (!isConnected) return;
+            
+            // Отправляем точку в сохраненные сообщения
+            await client.sendMessage('me', { message: '🟢' });
+            console.log(`💓 Keep-alive отправлен в ${new Date().toLocaleTimeString()}`);
+            reconnectAttempts = 0;
         } catch (error) {
             console.log(`❌ Keep-alive ошибка: ${error.message}`);
+            reconnectAttempts++;
+            
+            // Если 3 ошибки подряд - перезапускаем
+            if (reconnectAttempts >= 3) {
+                console.log('⚠️ 3 ошибки keep-alive, перезапуск...');
+                process.exit(0);
+            }
         }
     };
     
-    // Первый раз через 2 минуты после запуска
-    setTimeout(sendKeepAlive, 2 * 60 * 1000);
+    // Первый раз через 1 минуту
+    setTimeout(sendPing, 60 * 1000);
     
-    // Дальше каждые 4 минуты (Render отключает через 15 минут без активности)
-    setInterval(sendKeepAlive, 4 * 60 * 1000);
+    // Дальше каждые 3 минуты
+    keepAliveInterval = setInterval(sendPing, 3 * 60 * 1000);
 }
 
 // ==========================================
@@ -245,8 +268,10 @@ async function startBot() {
     const stringSession = new StringSession(SESSION_STRING);
     
     const client = new TelegramClient(stringSession, API_ID, API_HASH, {
-        connectionRetries: 10,
-        retryDelay: 3000,
+        connectionRetries: 20,
+        retryDelay: 5000,
+        requestRetries: 10,
+        receiveRetryDelay: 5000,
         useWSS: true,
         deviceModel: 'Desktop',
         systemVersion: 'Windows 11',
@@ -254,19 +279,30 @@ async function startBot() {
         baseLogger: console
     });
     
+    currentClient = client;
+    
     try {
         console.log('🔌 Подключение к Telegram...');
         await client.connect();
         
         console.log('✅ Подключено!');
+        reconnectAttempts = 0;
         
         const me = await client.getMe();
         console.log(`👤 Авторизован: ${me.firstName || ''} @${me.username || 'нет'}`);
         
         console.log('✅ БОТ ЗАПУЩЕН И МОНИТОРИТ ЧАТЫ');
         
-        // ЗАПУСКАЕМ KEEP-ALIVE (сам себе пишет каждые 4 минуты)
-        keepAlive(client);
+        // ЗАПУСКАЕМ KEEP-ALIVE
+        await startKeepAlive(client);
+        
+        // Мониторинг соединения (каждые 30 секунд проверяем)
+        setInterval(async () => {
+            if (!client.connected) {
+                console.log('⚠️ Соединение разорвано, перезапуск...');
+                process.exit(0);
+            }
+        }, 30000);
         
         // ==========================================
         // ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ
@@ -281,8 +317,8 @@ async function startBot() {
                 if (!text || text.length < 15) return;
                 if (text.startsWith('/')) return;
                 
-                // Пропускаем keep-alive сообщения (точка)
-                if (text === '.') return;
+                // Пропускаем keep-alive сообщения
+                if (text === '🟢' || text === '.') return;
                 
                 totalProcessed++;
                 
@@ -391,7 +427,8 @@ async function startBot() {
                 stats += `🔴 Срочных: ${high}\n`;
                 stats += `📝 Всего лидов: ${total}\n`;
                 stats += `📅 Сегодня: ${today}\n`;
-                stats += `👀 Проверено: ${totalProcessed}\n\n`;
+                stats += `👀 Проверено: ${totalProcessed}\n`;
+                stats += `🔄 Соединение: ${client.connected ? '✅' : '❌'}\n\n`;
                 stats += `📈 ТОП ЧАТОВ:\n`;
                 
                 const sorted = Object.entries(chatStats).sort((a, b) => b[1] - a[1]).slice(0, 5);
@@ -422,7 +459,7 @@ async function startBot() {
             }
             
             if (text === '/ping') {
-                await message.reply({ message: '🏓 Понг! Бот работает!' });
+                await message.reply({ message: `🏓 Понг! Соединение: ${client.connected ? '✅' : '❌'}` });
             }
             
             if (text === '/reset') {
@@ -437,11 +474,12 @@ async function startBot() {
         }, new NewMessage({ fromUsers: ['me'] }));
         
         console.log('✅ ГОТОВ К РАБОТЕ');
-        console.log('⏰ Keep-alive: каждые 4 минуты бот пишет себе точку');
+        console.log('⏰ Keep-alive: каждые 3 минуты');
+        console.log('🔄 Авто-перезапуск при разрыве связи');
         
         // Каждые 5 минут пишем в консоль статус
         setInterval(() => {
-            console.log(`💚 Жив. Лидов: ${totalLeads}, Проверено: ${totalProcessed}`);
+            console.log(`💚 Статус: Лидов ${totalLeads}, Проверено ${totalProcessed}, Connected: ${client.connected}`);
         }, 300000);
         
     } catch (err) {
@@ -458,5 +496,11 @@ async function startBot() {
     startBot();
 })();
 
-process.on('SIGTERM', () => process.exit(0));
-process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => {
+    console.log('SIGTERM, завершение...');
+    process.exit(0);
+});
+process.on('SIGINT', () => {
+    console.log('SIGINT, завершение...');
+    process.exit(0);
+});
