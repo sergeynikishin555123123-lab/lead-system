@@ -70,49 +70,59 @@ async function startBot() {
         await client.connect();
         const me = await client.getMe();
         console.log(`Авторизован: ${me.firstName}`);
+        console.log('Бот запущен');
+        
+        client.addEventHandler(async (event) => {
+            try {
+                const msg = event.message;
+                if (msg.out) return;
+                const text = msg.message || '';
+                if (text.length < 15 || text.startsWith('/')) return;
+                
+                const msgId = `${msg.chatId}_${msg.id}`;
+                if (processedMessages.has(msgId)) return;
+                processedMessages.add(msgId);
+                totalProcessed++;
+                
+                const lower = text.toLowerCase();
+                const hasKeyword = PRIMARY_KEYWORDS.some(w => lower.includes(w)) || SECONDARY_KEYWORDS.some(w => lower.includes(w));
+                if (!hasKeyword) return;
+                
+                if (!isRealClient(text)) {
+                    totalSkipped++;
+                    return;
+                }
+                
+                totalLeads++;
+                let chatName = 'Чат', sender = 'Пользователь', link = '';
+                try {
+                    const chat = await msg.getChat();
+                    chatName = chat.title || 'Личка';
+                    const s = await msg.getSender();
+                    sender = s.firstName || 'Пользователь';
+                    if (chat.username) link = `https://t.me/${chat.username}/${msg.id}`;
+                } catch(e) {}
+                
+                const leadMsg = `НОВЫЙ ЛИД\nЧат: ${chatName}\nОт: ${sender}\nКонтакты: ${extractContacts(text)}\nГород: ${detectCity(text)}\nСрочность: ${detectUrgency(text)}\n\n${text.substring(0, 300)}\n\n${link}`;
+                await client.sendMessage('me', { message: leadMsg });
+                console.log(`Лид! Всего: ${totalLeads}`);
+            } catch(err) {
+                console.error('Ошибка обработки:', err.message);
+            }
+        }, new NewMessage({}));
         
         client.addEventHandler(async (event) => {
             const msg = event.message;
-            if (msg.out) return;
             const text = msg.message || '';
-            if (text.length < 15 || text.startsWith('/')) return;
-            
-            const msgId = `${msg.chatId}_${msg.id}`;
-            if (processedMessages.has(msgId)) return;
-            processedMessages.add(msgId);
-            totalProcessed++;
-            
-            const lower = text.toLowerCase();
-            const hasKeyword = PRIMARY_KEYWORDS.some(w => lower.includes(w)) || SECONDARY_KEYWORDS.some(w => lower.includes(w));
-            if (!hasKeyword) return;
-            
-            if (!isRealClient(text)) {
-                totalSkipped++;
-                return;
+            if (text === '/stats') {
+                const reply = `Лидов: ${totalLeads}\nПроверено: ${totalProcessed}`;
+                await client.sendMessage(msg.chatId, { message: reply, replyTo: msg.id });
             }
-            
-            totalLeads++;
-            let chatName = 'Чат', sender = 'Пользователь', link = '';
-            try {
-                const chat = await msg.getChat();
-                chatName = chat.title || 'Личка';
-                const s = await msg.getSender();
-                sender = s.firstName || 'Пользователь';
-                if (chat.username) link = `https://t.me/${chat.username}/${msg.id}`;
-            } catch(e) {}
-            
-            const leadMsg = `НОВЫЙ ЛИД\nЧат: ${chatName}\nОт: ${sender}\nКонтакты: ${extractContacts(text)}\nГород: ${detectCity(text)}\nСрочность: ${detectUrgency(text)}\n\n${text.substring(0, 300)}\n\n${link}`;
-            await client.sendMessage('me', { message: leadMsg });
-            console.log(`Лид! Всего: ${totalLeads}`);
-        }, new NewMessage({}));
-        
-        client.addEventHandler(async (e) => {
-            const text = e.message.message;
-            if (text === '/stats') await e.message.reply(`Лидов: ${totalLeads}\nПроверено: ${totalProcessed}`);
-            if (text === '/ping') await e.message.reply('pong');
+            if (text === '/ping') {
+                await client.sendMessage(msg.chatId, { message: 'pong', replyTo: msg.id });
+            }
         }, new NewMessage({ fromUsers: ['me'] }));
         
-        console.log('Бот запущен');
     } catch(err) {
         console.error('Ошибка:', err.message);
         setTimeout(startBot, 10000);
