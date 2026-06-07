@@ -25,7 +25,13 @@ const botStartTime = Date.now();
 
 const server = http.createServer((req, res) => {
     const uptime = Math.floor((Date.now() - botStartTime) / 1000);
-    res.end(JSON.stringify({ status: 'ok', uptime, totalLeads, totalProcessed }));
+    res.end(JSON.stringify({ 
+        status: 'ok', 
+        uptime: `${Math.floor(uptime/3600)}ч ${Math.floor((uptime%3600)/60)}м`,
+        totalLeads, 
+        totalProcessed,
+        totalSkipped
+    }));
 });
 server.listen(PORT, '0.0.0.0');
 
@@ -43,9 +49,9 @@ function detectCity(text) {
 
 function detectUrgency(text) {
     const lower = text.toLowerCase();
-    if (URGENCY_KEYWORDS.HIGH.some(w => lower.includes(w))) return 'HIGH';
-    if (URGENCY_KEYWORDS.MEDIUM.some(w => lower.includes(w))) return 'MEDIUM';
-    return 'LOW';
+    if (URGENCY_KEYWORDS.HIGH.some(w => lower.includes(w))) return '🔴 HIGH';
+    if (URGENCY_KEYWORDS.MEDIUM.some(w => lower.includes(w))) return '🟡 MEDIUM';
+    return '🟢 LOW';
 }
 
 function isRealClient(text) {
@@ -59,7 +65,7 @@ function isRealClient(text) {
 }
 
 async function startBot() {
-    console.log('Запуск...');
+    console.log('🚀 Запуск бота...');
     const client = new TelegramClient(new StringSession(SESSION_STRING), API_ID, API_HASH, {
         connectionRetries: 5,
         retryDelay: 3000,
@@ -69,8 +75,8 @@ async function startBot() {
     try {
         await client.connect();
         const me = await client.getMe();
-        console.log(`Авторизован: ${me.firstName}`);
-        console.log('Бот запущен');
+        console.log(`✅ Авторизован: ${me.firstName}`);
+        console.log('✅ Бот работает');
         
         client.addEventHandler(async (event) => {
             try {
@@ -103,28 +109,33 @@ async function startBot() {
                     if (chat.username) link = `https://t.me/${chat.username}/${msg.id}`;
                 } catch(e) {}
                 
-                const leadMsg = `НОВЫЙ ЛИД\nЧат: ${chatName}\nОт: ${sender}\nКонтакты: ${extractContacts(text)}\nГород: ${detectCity(text)}\nСрочность: ${detectUrgency(text)}\n\n${text.substring(0, 300)}\n\n${link}`;
+                const leadMsg = `🔴 НОВЫЙ ЛИД\n\n📌 Чат: ${chatName}\n👤 Отправитель: ${sender}\n📞 Контакты: ${extractContacts(text)}\n📍 Город: ${detectCity(text)}\n⚡️ Срочность: ${detectUrgency(text)}\n\n💬 Сообщение:\n${text.substring(0, 500)}\n\n🔗 ${link}`;
                 await client.sendMessage('me', { message: leadMsg });
-                console.log(`Лид! Всего: ${totalLeads}`);
+                console.log(`🎯 ЛИД! Всего: ${totalLeads} | ${chatName}`);
             } catch(err) {
-                console.error('Ошибка обработки:', err.message);
+                console.error('Ошибка:', err.message);
             }
         }, new NewMessage({}));
         
         client.addEventHandler(async (event) => {
             const msg = event.message;
             const text = msg.message || '';
-            if (text === '/stats') {
-                const reply = `Лидов: ${totalLeads}\nПроверено: ${totalProcessed}`;
-                await client.sendMessage(msg.chatId, { message: reply, replyTo: msg.id });
-            }
-            if (text === '/ping') {
-                await client.sendMessage(msg.chatId, { message: 'pong', replyTo: msg.id });
+            try {
+                if (text === '/stats') {
+                    const uptime = Math.floor((Date.now() - botStartTime) / 1000);
+                    const reply = `📊 СТАТИСТИКА\n\n⏱ Аптайм: ${Math.floor(uptime/3600)}ч ${Math.floor((uptime%3600)/60)}м\n🎯 Лидов: ${totalLeads}\n👀 Проверено: ${totalProcessed}\n⏭️ Пропущено: ${totalSkipped}`;
+                    await client.sendMessage(msg.chatId, { message: reply });
+                }
+                if (text === '/ping') {
+                    await client.sendMessage(msg.chatId, { message: '🏓 Понг! Бот работает' });
+                }
+            } catch(err) {
+                console.error('Ошибка команды:', err.message);
             }
         }, new NewMessage({ fromUsers: ['me'] }));
         
     } catch(err) {
-        console.error('Ошибка:', err.message);
+        console.error('❌ Ошибка:', err.message);
         setTimeout(startBot, 10000);
     }
 }
