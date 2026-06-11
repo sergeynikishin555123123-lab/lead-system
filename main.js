@@ -52,7 +52,7 @@ function isLead(text) {
 }
 
 async function start() {
-  console.log('🚀 Bot starting with TCP mode...');
+  console.log('🚀 Bot starting with TCP mode on port 443...');
 
   const client = new TelegramClient(
     new StringSession(SESSION_STRING),
@@ -60,13 +60,15 @@ async function start() {
     API_HASH,
     {
       connectionRetries: 5,
-      useWSS: false,
-      port: 443,
+      useWSS: false,           // Полностью отключаем WebSocket
+      port: 443,               // Только 443 порт
       deviceModel: 'Desktop',
       systemVersion: 'Ubuntu 22.04',
       appVersion: '4.9.0',
       langCode: 'ru',
-      autoReconnect: true
+      autoReconnect: true,
+      retryDelay: 3000,
+      timeout: 30
     }
   );
 
@@ -116,7 +118,7 @@ async function start() {
 
 📍 Чат: ${chatName}
 👤 Отправитель: ${senderName}
-🔗 Ссылка: ${senderLink}
+🔗 Ссылка на отправителя: ${senderLink}
 📞 Контакты: ${extractContacts(text)}
 📍 Город: ${detectCity(text)}
 ⚡ Срочность: ${detectUrgency(text)}
@@ -124,7 +126,7 @@ async function start() {
 💬 Сообщение:
 ${text.slice(0, 400)}
 
-🔗 Ссылка на сообщение: ${messageLink || 'нет'}
+🔗 Ссылка на сообщение: ${messageLink || 'нет (приватный чат)'}
         `;
 
         await client.sendMessage('me', { message: lead });
@@ -137,18 +139,20 @@ ${text.slice(0, 400)}
 
     console.log('🤖 Bot is running...');
     
+    // Проверка соединения каждую минуту
     setInterval(async () => {
       try {
         await client.getMe();
         console.log('💓 Connection alive');
       } catch(e) {
-        console.log('⚠️ Reconnecting...');
-        await client.connect();
+        console.log('⚠️ Connection lost, reconnecting...');
+        try { await client.connect(); } catch(connErr) { console.log('Reconnect failed:', connErr.message); }
       }
     }, 60000);
 
   } catch (err) {
-    console.log('❌ FATAL:', err.message);
+    console.log('❌ FATAL ERROR:', err.message);
+    console.log('Restarting in 10 seconds...');
     setTimeout(start, 10000);
   }
 }
