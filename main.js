@@ -9,8 +9,7 @@ const {
     STOP_WORDS,
     URGENCY_KEYWORDS,
     CITIES,
-    CLIENT_MARKERS,
-    MONITOR_CHAT_ID
+    CLIENT_MARKERS
 } = require('./filters');
 
 const API_ID = parseInt(process.env.API_ID);
@@ -118,10 +117,6 @@ async function startBot() {
         console.log(`✅ Авторизован: ${me.firstName} ${me.lastName || ''} (@${me.username || 'нет'})`);
         console.log('✅ БОТ ЗАПУЩЕН И РАБОТАЕТ 24/7');
         
-        // Отправляем приветствие в мониторинг чат или в избранное
-        const targetChat = MONITOR_CHAT_ID || 'me';
-        await client.sendMessage(targetChat, { message: `🤖 Бот запущен\n⏰ ${new Date().toLocaleString('ru-RU')}` });
-        
         client.addEventHandler(async (event) => {
             try {
                 const message = event.message;
@@ -181,7 +176,7 @@ async function startBot() {
                 
                 const leadMessage = formatLead(chatName, chatLink, senderName, senderUsername, text, contacts, city, urgency, reason, msgLink);
                 
-                await client.sendMessage(targetChat, { message: leadMessage });
+                await client.sendMessage('me', { message: leadMessage });
                 console.log(`🎯 ЛИД! Всего: ${totalLeads} | ${chatName} | ${urgency}`);
                 
             } catch(err) {
@@ -189,23 +184,20 @@ async function startBot() {
             }
         }, new NewMessage({}));
         
-        // Обработка команд от вас (только status и stats)
         client.addEventHandler(async (event) => {
             const msg = event.message;
             const text = msg.message || '';
             
-            if (text === '/status') {
-                const uptime = Math.floor((Date.now() - botStartTime) / 1000);
-                const statusMsg = `📊 СТАТУС БОТА\n\n⏱ Аптайм: ${Math.floor(uptime/3600)}ч ${Math.floor((uptime%3600)/60)}м\n🎯 Лидов найдено: ${totalLeads}\n👀 Проверено сообщений: ${totalProcessed}\n⏭️ Пропущено: ${totalSkipped}\n📈 Конверсия: ${totalProcessed > 0 ? ((totalLeads/totalProcessed)*100).toFixed(1) : 0}%\n\n✅ Бот работает нормально`;
-                await client.sendMessage(msg.chatId, { message: statusMsg });
-                console.log('📊 Отправлен статус по команде');
-            }
-            
             if (text === '/stats') {
                 const uptime = Math.floor((Date.now() - botStartTime) / 1000);
-                const statsMsg = `📈 ДЕТАЛЬНАЯ СТАТИСТИКА\n\n📊 Всего обработано: ${totalProcessed}\n🎯 Найдено лидов: ${totalLeads}\n⏭️ Пропущено: ${totalSkipped}\n📈 Конверсия: ${totalProcessed > 0 ? ((totalLeads/totalProcessed)*100).toFixed(1) : 0}%\n⏱ Аптайм: ${Math.floor(uptime/3600)}ч ${Math.floor((uptime%3600)/60)}м ${uptime%60}с\n🕐 Запущен: ${new Date(botStartTime).toLocaleString('ru-RU')}\n💾 Уникальных сообщений в кэше: ${processedMessages.size}`;
-                await client.sendMessage(msg.chatId, { message: statsMsg });
-                console.log('📊 Отправлена детальная статистика по команде');
+                await msg.reply(`📊 СТАТИСТИКА\n\n⏱ Аптайм: ${Math.floor(uptime/3600)}ч ${Math.floor((uptime%3600)/60)}м\n🎯 Лидов: ${totalLeads}\n👀 Проверено: ${totalProcessed}\n⏭️ Пропущено: ${totalSkipped}`);
+            }
+            if (text === '/ping') await msg.reply('🏓 Понг! Бот на VDSina 24/7!');
+            if (text === '/reset') {
+                totalProcessed = 0;
+                totalLeads = 0;
+                totalSkipped = 0;
+                await msg.reply('✅ Статистика сброшена!');
             }
         }, new NewMessage({ fromUsers: ['me'] }));
         
