@@ -1,6 +1,12 @@
 {
   "name": "lead-bot",
-  "version": "2.0.0",
-  "description": "Lead bot with Pyrogram",
-  "main": "bot.py"
+  "version": "1.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js"
+  },
+  "dependencies": {
+    "telegram": "^2.21.0",
+    "dotenv": "^16.3.1"
+  }
 }
