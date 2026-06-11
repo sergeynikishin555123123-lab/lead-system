@@ -30,6 +30,9 @@ const URGENCY_KEYWORDS = {
 
 const IGNORE_CHATS = [2230335237];
 
+// ID группы для отправки уведомлений
+const MONITOR_CHAT_ID = -5196059875;  // ← ВСТАВЬТЕ СЮДА
+
 module.exports = {
   PRIMARY_KEYWORDS,
   SECONDARY_KEYWORDS,
@@ -37,5 +40,6 @@ module.exports = {
   CLIENT_MARKERS,
   CITIES,
   URGENCY_KEYWORDS,
-  IGNORE_CHATS
+  IGNORE_CHATS,
+  MONITOR_CHAT_ID
 };
