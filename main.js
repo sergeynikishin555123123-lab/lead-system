@@ -43,14 +43,11 @@ function detectUrgency(text) {
 
 function isLead(text) {
   const lower = text.toLowerCase();
-
   if (STOP_WORDS.some(w => lower.includes(w))) return false;
-
   let score = 0;
   PRIMARY_KEYWORDS.forEach(w => { if (lower.includes(w)) score += 3; });
   SECONDARY_KEYWORDS.forEach(w => { if (lower.includes(w)) score += 2; });
   CLIENT_MARKERS.forEach(w => { if (lower.includes(w)) score += 2; });
-
   return score >= 3;
 }
 
@@ -62,7 +59,17 @@ async function start() {
     API_ID,
     API_HASH,
     {
-      connectionRetries: 5
+      connectionRetries: 10,
+      connectionRetryDelay: 5000,
+      // КЛЮЧЕВЫЕ ФИКСЫ ДЛЯ VPS:
+      useWSS: true,           // WebSocket вместо TCP
+      port: 443,              // HTTPS-порт (реже блокируется)
+      deviceModel: 'VPS Bot',
+      systemVersion: 'Ubuntu 22.04',
+      appVersion: '2.0.0',
+      langCode: 'ru',
+      autoReconnect: true,
+      floodSleepThreshold: 60
     }
   );
 
@@ -70,6 +77,7 @@ async function start() {
 
   const me = await client.getMe();
   console.log('✅ Logged in as', me.firstName);
+  console.log('✅ Connection stable (WSS on port 443)');
 
   client.addEventHandler(async (event) => {
     try {
@@ -80,18 +88,13 @@ async function start() {
       if (!text || text.length < 10) return;
 
       const msgId = `${msg.chatId}_${msg.id}`;
-
       if (processedMessages.has(msgId)) return;
       processedMessages.add(msgId);
-
       totalProcessed++;
 
       const lower = text.toLowerCase();
-
-      const hasKeyword =
-        PRIMARY_KEYWORDS.some(w => lower.includes(w)) ||
-        SECONDARY_KEYWORDS.some(w => lower.includes(w));
-
+      const hasKeyword = PRIMARY_KEYWORDS.some(w => lower.includes(w)) || 
+                         SECONDARY_KEYWORDS.some(w => lower.includes(w));
       if (!hasKeyword) return;
 
       if (!isLead(text)) {
@@ -103,15 +106,11 @@ async function start() {
 
       const chat = await msg.getChat().catch(() => null);
       const sender = await msg.getSender().catch(() => null);
-
       const chatName = chat?.title || 'Личка';
       const senderName = sender?.firstName || 'user';
-      
-      // ССЫЛКА НА ОТПРАВИТЕЛЯ (то что вы хотели)
       const senderLink = sender?.username 
         ? `https://t.me/${sender.username}` 
         : (sender?.id ? `tg://user?id=${sender.id}` : 'нет ссылки');
-
       const messageLink = chat?.username
         ? `https://t.me/${chat.username}/${msg.id}`
         : '';
@@ -122,7 +121,7 @@ async function start() {
 📍 Чат: ${chatName}
 👤 Отправитель: ${senderName}
 🔗 Ссылка на отправителя: ${senderLink}
-📞 Контакты в сообщении: ${extractContacts(text)}
+📞 Контакты: ${extractContacts(text)}
 📍 Город: ${detectCity(text)}
 ⚡ Срочность: ${detectUrgency(text)}
 
@@ -133,18 +132,28 @@ ${text.slice(0, 400)}
       `;
 
       await client.sendMessage('me', { message: lead });
-
-      console.log(`🎯 LEAD #${totalLeads} | ${chatName} | ${senderName}`);
+      console.log(`🎯 LEAD #${totalLeads} | ${chatName}`);
 
     } catch (e) {
-      console.log('ERROR in handler:', e.message);
+      console.log('ERROR:', e.message);
     }
   }, new NewMessage({}));
 
-  console.log('🤖 Bot is running. Monitoring chats...');
+  console.log('🤖 Bot is running with stable connection...');
+  
+  // Проверка соединения каждые 30 секунд
+  setInterval(async () => {
+    try {
+      await client.getMe();
+      console.log('💓 Connection alive');
+    } catch(e) {
+      console.log('⚠️ Connection lost, reconnecting...');
+      await client.connect();
+    }
+  }, 30000);
 }
 
 start().catch(err => {
   console.log('FATAL:', err.message);
-  setTimeout(start, 5000);
+  setTimeout(start, 10000);
 });
