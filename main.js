@@ -2,32 +2,23 @@ require('dotenv').config();
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
-const http = require('http');
 
 const API_ID = parseInt(process.env.API_ID);
 const API_HASH = process.env.API_HASH;
 const SESSION_STRING = process.env.SESSION_STRING || '';
-const PORT = process.env.PORT || 8080;
 
+// КЛЮЧЕВЫЕ СЛОВА
 const PRIMARY_KEYWORDS = ['электрик', 'электромонтаж', 'проводка', 'щит', 'розетка', 'освещение', 'кабель', 'штроба', 'нужен электрик'];
-const SECONDARY_KEYWORDS = ['коротнул', 'искрит', 'выбивает', 'нет света', 'подключить', 'новостройка'];
-const STOP_WORDS = ['вакансия', 'ищу работу', 'резюме', 'продам', 'куплю'];
-const CLIENT_MARKERS = ['мне нужно', 'нужно сделать', 'ищу мастера', 'кто может сделать', 'посоветуйте', 'квартира', 'ремонт'];
-const CITIES = ['москва', 'зеленоград', 'химки', 'лобня'];
-const URGENCY_KEYWORDS = {
-    HIGH: ['срочно', 'сегодня', 'сейчас', 'авария'],
-    MEDIUM: ['завтра', 'на неделе', 'скоро']
-};
+const SECONDARY_KEYWORDS = ['коротнул', 'искрит', 'выбивает', 'нет света', 'подключить'];
+const STOP_WORDS = ['вакансия', 'ищу работу', 'резюме', 'продам', 'куплю', 'кот', 'собака'];
+const CITIES = ['москва', 'зеленоград', 'химки', 'лобня', 'солнечногорск'];
+
+// КУДА ОТПРАВЛЯТЬ ЛИДЫ (ВАША ГРУППА)
+const MONITOR_CHAT_ID = -5196059875;
 
 let totalProcessed = 0, totalLeads = 0, totalSkipped = 0;
 const processedMessages = new Set();
 const botStartTime = Date.now();
-
-const server = http.createServer((req, res) => {
-    const uptime = Math.floor((Date.now() - botStartTime) / 1000);
-    res.end(JSON.stringify({ status: 'ok', uptime, totalLeads, totalProcessed }));
-});
-server.listen(PORT, '0.0.0.0');
 
 function extractContacts(text) {
     const phones = text.match(/\+7[\s\(-]?\d{3}[\s\)-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}/g);
@@ -37,15 +28,10 @@ function extractContacts(text) {
 
 function detectCity(text) {
     const lower = text.toLowerCase();
-    for (const city of CITIES) if (lower.includes(city)) return city;
+    for (const city of CITIES) {
+        if (lower.includes(city)) return city.charAt(0).toUpperCase() + city.slice(1);
+    }
     return 'не указан';
-}
-
-function detectUrgency(text) {
-    const lower = text.toLowerCase();
-    if (URGENCY_KEYWORDS.HIGH.some(w => lower.includes(w))) return 'HIGH';
-    if (URGENCY_KEYWORDS.MEDIUM.some(w => lower.includes(w))) return 'MEDIUM';
-    return 'LOW';
 }
 
 function isRealClient(text) {
@@ -54,12 +40,12 @@ function isRealClient(text) {
     let score = 0;
     PRIMARY_KEYWORDS.forEach(w => { if (lower.includes(w)) score += 3; });
     SECONDARY_KEYWORDS.forEach(w => { if (lower.includes(w)) score += 2; });
-    CLIENT_MARKERS.forEach(w => { if (lower.includes(w)) score += 2; });
     return score >= 3;
 }
 
 async function startBot() {
-    console.log('Запуск...');
+    console.log('🚀 Запуск бота...');
+    
     const client = new TelegramClient(new StringSession(SESSION_STRING), API_ID, API_HASH, {
         connectionRetries: 5,
         retryDelay: 3000,
@@ -67,54 +53,84 @@ async function startBot() {
     });
     
     try {
-        await client.connect();
+        await client.start({
+            phone: () => Promise.resolve(''),
+            phoneCode: () => Promise.resolve(''),
+            password: () => Promise.resolve(''),
+            onError: (err) => console.log(err)
+        });
+        
         const me = await client.getMe();
-        console.log(`Авторизован: ${me.firstName}`);
+        console.log(`✅ Авторизован: ${me.firstName}`);
+        console.log(`✅ Бот запущен, отправляем в группу ${MONITOR_CHAT_ID}`);
+        
+        await client.sendMessage(MONITOR_CHAT_ID, { message: `🤖 Бот запущен\n⏰ ${new Date().toLocaleString('ru-RU')}` });
         
         client.addEventHandler(async (event) => {
-            const msg = event.message;
-            if (msg.out) return;
-            const text = msg.message || '';
-            if (text.length < 15 || text.startsWith('/')) return;
-            
-            const msgId = `${msg.chatId}_${msg.id}`;
-            if (processedMessages.has(msgId)) return;
-            processedMessages.add(msgId);
-            totalProcessed++;
-            
-            const lower = text.toLowerCase();
-            const hasKeyword = PRIMARY_KEYWORDS.some(w => lower.includes(w)) || SECONDARY_KEYWORDS.some(w => lower.includes(w));
-            if (!hasKeyword) return;
-            
-            if (!isRealClient(text)) {
-                totalSkipped++;
-                return;
-            }
-            
-            totalLeads++;
-            let chatName = 'Чат', sender = 'Пользователь', link = '';
             try {
-                const chat = await msg.getChat();
-                chatName = chat.title || 'Личка';
-                const s = await msg.getSender();
-                sender = s.firstName || 'Пользователь';
-                if (chat.username) link = `https://t.me/${chat.username}/${msg.id}`;
-            } catch(e) {}
-            
-            const leadMsg = `НОВЫЙ ЛИД\nЧат: ${chatName}\nОт: ${sender}\nКонтакты: ${extractContacts(text)}\nГород: ${detectCity(text)}\nСрочность: ${detectUrgency(text)}\n\n${text.substring(0, 300)}\n\n${link}`;
-            await client.sendMessage('me', { message: leadMsg });
-            console.log(`Лид! Всего: ${totalLeads}`);
+                const message = event.message;
+                if (message.out) return;
+                
+                const text = message.message || '';
+                if (text.length < 15 || text.startsWith('/')) return;
+                
+                const msgHash = `${message.chatId}_${message.id}`;
+                if (processedMessages.has(msgHash)) return;
+                processedMessages.add(msgHash);
+                if (processedMessages.size > 5000) processedMessages.clear();
+                
+                totalProcessed++;
+                
+                const hasKeyword = PRIMARY_KEYWORDS.some(w => text.toLowerCase().includes(w)) || 
+                                 SECONDARY_KEYWORDS.some(w => text.toLowerCase().includes(w));
+                if (!hasKeyword) return;
+                
+                if (!isRealClient(text)) {
+                    totalSkipped++;
+                    return;
+                }
+                
+                totalLeads++;
+                
+                let chatName = 'Неизвестный чат', senderName = 'Неизвестный', msgLink = '';
+                try {
+                    const chat = await message.getChat();
+                    chatName = chat.title || 'Личный чат';
+                    if (chat.username) msgLink = `https://t.me/${chat.username}/${message.id}`;
+                    else if (String(chat.id).startsWith('-100')) msgLink = `https://t.me/c/${String(chat.id).replace('-100', '')}/${message.id}`;
+                } catch(e) {}
+                
+                try {
+                    const sender = await message.getSender();
+                    senderName = sender.firstName || 'Пользователь';
+                } catch(e) {}
+                
+                const contacts = extractContacts(text);
+                const city = detectCity(text);
+                const urgency = text.toLowerCase().includes('срочно') ? '🔴 СРОЧНО' : '🟢 Обычный';
+                
+                const leadMessage = `🎯 НОВЫЙ ЛИД!\n\n📌 Чат: ${chatName}\n👤 Отправитель: ${senderName}\n📍 Город: ${city}\n📞 Контакты: ${contacts}\n⚡️ ${urgency}\n\n💬 Сообщение:\n${text.substring(0, 400)}\n\n${msgLink}\n⏰ ${new Date().toLocaleString('ru-RU')}`;
+                
+                await client.sendMessage(MONITOR_CHAT_ID, { message: leadMessage });
+                console.log(`🎯 ЛИД! Всего: ${totalLeads} | ${chatName}`);
+                
+            } catch(err) {
+                console.error('Ошибка:', err.message);
+            }
         }, new NewMessage({}));
         
-        client.addEventHandler(async (e) => {
-            const text = e.message.message;
-            if (text === '/stats') await e.message.reply(`Лидов: ${totalLeads}\nПроверено: ${totalProcessed}`);
-            if (text === '/ping') await e.message.reply('pong');
+        // ТОЛЬКО КОМАНДА /status
+        client.addEventHandler(async (event) => {
+            const msg = event.message;
+            if (msg.message === '/status') {
+                const uptime = Math.floor((Date.now() - botStartTime) / 1000);
+                const statusMsg = `📊 СТАТУС БОТА\n\n🕐 Аптайм: ${Math.floor(uptime/3600)}ч ${Math.floor((uptime%3600)/60)}м\n🎯 Лидов: ${totalLeads}\n👀 Проверено: ${totalProcessed}\n⏭️ Пропущено: ${totalSkipped}\n📈 Конверсия: ${totalProcessed > 0 ? ((totalLeads/totalProcessed)*100).toFixed(1) : 0}%\n\n✅ Бот работает`;
+                await client.sendMessage(msg.chatId, { message: statusMsg });
+            }
         }, new NewMessage({ fromUsers: ['me'] }));
         
-        console.log('Бот запущен');
     } catch(err) {
-        console.error('Ошибка:', err.message);
+        console.error('❌ Ошибка:', err.message);
         setTimeout(startBot, 10000);
     }
 }
